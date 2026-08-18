@@ -25,9 +25,11 @@ append_defconfig() {
 # 1. Fix KSU boottime (timespec mismatch on kernel 4.14)
 for EVENT_C in $(find "$KERNEL_DIR" -type f -path "*/kernelsu*/event.c" 2>/dev/null); do
   echo "==> Fixing boottime struct in $EVENT_C"
-  # Force KSU to use 32-bit timespec
-  sed -i 's/struct timespec64 ts;/struct timespec ts;/g' "$EVENT_C"
-  sed -i 's/ktime_get_boottime_ts64(&ts)/get_monotonic_boottime(\&ts)/g' "$EVENT_C"
+  
+  # Target the data type only so that it doesn't miss due to spaces/formatting
+  sed -i 's/struct timespec64/struct timespec/g' "$EVENT_C"
+  # Replace the function
+  sed -i 's/ktime_get_boottime_ts64/get_monotonic_boottime/g' "$EVENT_C"
 done
 
 # 2. Fix KSU undefined symbols (setenforce & ksu_input_hook)
