@@ -16,7 +16,9 @@ runs:
   steps:
     - name: Load toolchain manifest
       shell: bash
-      run: cat manifest/toolchains.env >> "$GITHUB_ENV"
+      run: |
+        # $GITHUB_ENV only accepts KEY=value lines — strip comments/blanks
+        grep -v '^\s*#' manifest/toolchains.env | grep -v '^\s*$' >> "$GITHUB_ENV"
 
     - name: Cache toolchain
       id: cache

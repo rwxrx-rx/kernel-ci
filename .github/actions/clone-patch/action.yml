@@ -50,14 +50,15 @@ runs:
     - name: Load manifests
       shell: bash
       run: |
-        # device.env / ksu-variants.env are single-line KEY=value only,
-        # safe to dump into $GITHUB_ENV directly. features.env has
+        # $GITHUB_ENV only accepts literal KEY=value lines — no comments,
+        # no blank lines — so strip those before appending.
+        # device.env / ksu-variants.env are otherwise single-line
+        # KEY=value only, safe to dump this way. features.env has
         # multi-line values (several CONFIG_ lines per feature), which
-        # $GITHUB_ENV's simple KEY=value format can't represent — that
-        # file gets `source`d straight from disk in patch_features.sh
-        # instead, not routed through $GITHUB_ENV.
-        cat manifest/device.env >> "$GITHUB_ENV"
-        cat manifest/ksu-variants.env >> "$GITHUB_ENV"
+        # $GITHUB_ENV's format can't represent at all — that file gets
+        # `source`d straight from disk in patch_features.sh instead.
+        grep -v '^\s*#' manifest/device.env | grep -v '^\s*$' >> "$GITHUB_ENV"
+        grep -v '^\s*#' manifest/ksu-variants.env | grep -v '^\s*$' >> "$GITHUB_ENV"
 
     - name: Clone kernel source
       shell: bash
