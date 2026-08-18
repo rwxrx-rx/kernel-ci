@@ -9,14 +9,15 @@ on:
       run_id:
         required: true
         type: string
-    secrets:
-      TELEGRAM_BOT_TOKEN:
-        required: false
-      TELEGRAM_CHAT_ID:
-        required: false
 
 jobs:
   publish:
+    # Telegram notifications (build-started / progress / build-done + zip)
+    # are sent live from the build-kernel job itself — see
+    # scripts/telegram_build_start.sh, telegram_progress.sh,
+    # telegram_build_done.sh — so this job only needs to run at all when
+    # a GitHub Release was actually asked for.
+    if: inputs.release_channel == 'github' || inputs.release_channel == 'both'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,15 +44,9 @@ jobs:
             for f in artifacts/changelog-*/changelog.md; do
               [ -f "$f" ] && cat "$f" && echo
             done
-          } > release-assets/../RELEASE_BODY.md
-
-          # Shortest telegram changelog wins the message body; long-form
-          # detail always lives in the GitHub Release itself.
-          find artifacts -name changelog_telegram.txt | head -n1 | xargs -r cat > tg_message.txt || true
-          [ -s tg_message.txt ] || echo "Camellia kernel build \`$TAG\`" > tg_message.txt
+          } > RELEASE_BODY.md
 
       - name: Create GitHub Release
-        if: inputs.release_channel == 'github' || inputs.release_channel == 'both'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.gather.outputs.tag }}
@@ -60,11 +55,3 @@ jobs:
           files: release-assets/*
           draft: false
           prerelease: false
-
-      - name: Push to Telegram
-        if: inputs.release_channel == 'telegram' || inputs.release_channel == 'both'
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          bash scripts/telegram_notify.sh tg_message.txt release-assets/*

@@ -29,11 +29,36 @@ scripts/
   patch_ksu.sh                 installs the selected fork, forces manual (non-kprobe) hook
   patch_susfs.sh                applies susfs4ksu on top of it
   patch_overlayfs_mountify.sh   CONFIG_OVERLAY_FS + stages Mountify.zip
+  patch_features.sh             applies whichever optional feature toggles were turned on
   build_anykernel3.sh           packages Image/dtb/dtbo into a flashable zip
   gen_changelog.sh              one script, two outputs: changelog.md (Release) +
-                                 changelog_telegram.txt (bot message)
-  telegram_notify.sh            sendMessage + sendDocument to your bot
+                                 changelog_telegram.txt (unused now, kept for reference)
+  telegram_lib.sh               shared helpers (friendly names, send/edit message)
+  telegram_build_start.sh       "🤖 Build Engine Started" message, remembers its message_id
+  telegram_progress.sh          edits that same message in place — [1/4]..[4/4] live progress
+  telegram_build_done.sh        rich "⚡ Kernel Ready" message + uploads the zip
+  telegram_notify.sh            legacy batch sender (message + N files), not called by any
+                                 workflow anymore but kept around if you want a summary post
 ```
+
+## Telegram notifications
+
+Sent **live, per build variant, from the `build-kernel` job itself** — not
+batched at the end — so vanilla and KSU builds (when `build_target: both`)
+each get their own start message, their own progress updates, and their
+own "Kernel Ready" post with the correct zip attached:
+
+1. **Build started** — device, codename, branch, KSU engine, who triggered it
+2. **Progress** — the *same* message is edited in place through
+   `[1/4] Cloning & patching...` → `[2/4] Compiling...` →
+   `[3/4] Packaging AnyKernel3...` → `[4/4] Uploading...` (no message spam)
+3. **Kernel Ready** — active-features checklist, last 5 commits with
+   relative time + author, a link to the commit, then the zip itself with
+   its size and SHA256
+
+The GitHub Release (if you also picked `github` or `both`) still happens
+separately at the end via `release.yml`, aggregating every variant's zip
+into one release with a merged changelog — that part didn't change.
 
 Why composite actions instead of one reusable workflow per stage: a
 `workflow_call` job runs on a fresh runner with nothing but artifacts you

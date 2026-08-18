@@ -94,4 +94,9 @@ if [ "${FEATURE_DROIDSPACE:-false}" = "true" ]; then
   echo "Note: DroidSpace itself (droidspaces.org) is installed on-device as an app, not compiled into the kernel — this step only turns on the kernel configs it needs."
 fi
 
+if [ "${FEATURE_F2FS_OPT:-false}" = "true" ]; then
+  echo "==> Enabling F2FS optimizations (compression, xattr/ACL)"
+  append_defconfig "$F2FS_OPT_DEFCONFIG"
+fi
+
 echo "Feature injection step finished."

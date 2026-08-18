@@ -17,10 +17,8 @@ runs:
     - name: Load toolchain manifest
       shell: bash
       run: |
-        source manifest/toolchains.env
-        grep -o '^[A-Z_0-9]\+' manifest/toolchains.env | while read -r KEY; do
-          echo "$KEY=${!KEY}" >> "$GITHUB_ENV"
-        done
+        # $GITHUB_ENV only accepts KEY=value lines — strip comments/blanks
+        grep -v '^\s*#' manifest/toolchains.env | grep -v '^\s*$' >> "$GITHUB_ENV"
 
     - name: Cache toolchain
       id: cache
@@ -41,14 +39,13 @@ runs:
       run: |
         mkdir -p toolchain
         git clone --depth=1 -b "$AOSP_CLANG_REF" "$AOSP_CLANG_REPO" aosp-clang-src
-        
+        # AOSP's linux-x86 prebuilts repo stores each release under its own dir
         if [ -d "aosp-clang-src/$AOSP_CLANG_SUBDIR" ]; then
           mv "aosp-clang-src/$AOSP_CLANG_SUBDIR"/* toolchain/
         else
           echo "::error::AOSP_CLANG_SUBDIR ($AOSP_CLANG_SUBDIR) not found in prebuilts repo — update manifest/toolchains.env"
           exit 1
         fi
-        
         rm -rf aosp-clang-src
 
     - name: Fetch GCC (binutils fallback, arm64+arm32)
