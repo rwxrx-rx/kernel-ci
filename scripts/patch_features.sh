@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# scripts/patch_features.sh
-# Reads the FEATURE_* booleans from env (set by clone-patch/action.yml
-# from the workflow_dispatch toggles) and applies each enabled one.
-
 set -euo pipefail
 
 : "${KERNEL_DIR:?}"
@@ -10,14 +6,11 @@ set -euo pipefail
 : "${DEFCONFIG:?}"
 : "${GITHUB_WORKSPACE:?}"
 
-# features.env has multi-line CONFIG_ blocks per feature, which can't be
-# passed through $GITHUB_ENV (KEY=value only) — source it directly.
 source "$GITHUB_WORKSPACE/manifest/features.env"
 
 DEFCONFIG_PATH="$KERNEL_DIR/arch/${ARCH}/configs/${DEFCONFIG}"
 
 append_defconfig() {
-  # $1 = newline-separated CONFIG_ lines
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     key="${line%%=*}"
@@ -41,13 +34,12 @@ if [ "${FEATURE_WIREGUARD:-false}" = "true" ]; then
   grep -q '"net/wireguard/Kconfig"' "$KERNEL_DIR/net/Kconfig" 2>/dev/null \
     || sed -i '/endmenu/i source "net/wireguard/Kconfig"' "$KERNEL_DIR/net/Kconfig"
   
-  # --- [PATCH] Fix WireGuard timespec redefinition error ---
   WG_COMPAT="$KERNEL_DIR/net/wireguard/compat/compat.h"
   if [ -f "$WG_COMPAT" ]; then
-      echo "⚙️ Patching WireGuard timespec redefinition..."
       python3 -c '
 path = "'"$WG_COMPAT"'"
 with open(path, "r") as f: text = f.read()
+
 target = "struct __kernel_timespec {"
 if target in text and "__kernel_timespec_defined" not in text:
     idx = text.find(target)
@@ -58,7 +50,11 @@ if target in text and "__kernel_timespec_defined" not in text:
         if started and brace == 0: end_idx = i + 1; break
     block = text[idx:end_idx]
     text = text.replace(block, f"#ifndef __kernel_timespec_defined\n#define __kernel_timespec_defined\n{block}\n#endif")
-    with open(path, "w") as f: f.write(text)
+
+text = text.replace("static __always_inline void old_synchronize_rcu(void)", "static __always_inline void wg_old_synchronize_rcu(void)")
+text = text.replace("old_synchronize_rcu()", "wg_old_synchronize_rcu()")
+
+with open(path, "w") as f: f.write(text)
 '
   fi
 
@@ -68,26 +64,27 @@ fi
 if [ "${FEATURE_BASEBAND_GUARD:-false}" = "true" ]; then
   echo "==> Integrating Baseband-guard (BBG)"
   ( cd "$KERNEL_DIR" && curl -LSs "$BBG_SETUP_URL" | bash - ) \
-    || echo "::warning::Baseband-guard setup.sh reported an error — check its README for manual integration steps on this tree"
+    || echo "::warning::Baseband-guard setup.sh reported an error"
   
-  # --- [PATCH] Fix Baseband Guard selinux_cred redefinition error ---
   BBG_TRACING="$KERNEL_DIR/security/baseband-guard/tracing/tracing.c"
   if [ -f "$BBG_TRACING" ]; then
-      echo "⚙️ Patching Baseband Guard selinux_cred redefinition..."
       python3 -c '
 path = "'"$BBG_TRACING"'"
 with open(path, "r") as f: text = f.read()
-target = "static inline struct task_security_struct *selinux_cred(const struct cred *cred)"
-if target in text and "_SELINUX_OBJSEC_H_" not in text:
-    idx = text.find(target)
-    brace = 0; end_idx = idx; started = False
-    for i in range(idx, len(text)):
-        if text[i] == "{": brace += 1; started = True
-        elif text[i] == "}": brace -= 1
-        if started and brace == 0: end_idx = i + 1; break
-    block = text[idx:end_idx]
-    text = text.replace(block, f"#ifndef _SELINUX_OBJSEC_H_\n{block}\n#endif")
-    with open(path, "w") as f: f.write(text)
+
+if "selinux_cred" in text and "static inline struct task_security_struct *selinux_cred" not in text:
+    helper = """
+#ifndef HAVE_SELINUX_CRED
+static inline struct task_security_struct *selinux_cred(const struct cred *cred)
+{
+    return container_of(cred->security, struct task_security_struct, sec);
+}
+#define HAVE_SELINUX_CRED
+#endif
+"""
+    text = helper + text
+
+with open(path, "w") as f: f.write(text)
 '
   fi
 
@@ -97,8 +94,6 @@ fi
 if [ "${FEATURE_THINLTO_O3:-false}" = "true" ]; then
   echo "==> Enabling ThinLTO + -O3"
   append_defconfig "$THINLTO_DEFCONFIG"
-  # Belt-and-suspenders for trees whose Makefile doesn't gate -O3 behind
-  # a Kconfig symbol: also swap the raw flag if present.
   MAKEFILE="$KERNEL_DIR/Makefile"
   grep -q -- '-O2' "$MAKEFILE" && sed -i 's/-O2/-O3/g' "$MAKEFILE" || true
 fi
@@ -119,12 +114,10 @@ if [ "${FEATURE_TCP_WESTWOOD:-false}" = "true" ]; then
 fi
 
 if [ "${FEATURE_TTL_SPOOF:-false}" = "true" ]; then
-  echo "==> Staging TTL/Hop-Limit spoof (sysctl, applied at boot — see manifest/features.env note on why this isn't a kernel patch)"
+  echo "==> Staging TTL/Hop-Limit spoof"
   mkdir -p "$GITHUB_WORKSPACE/out/extra"
   cat > "$GITHUB_WORKSPACE/out/extra/00_ttl_spoof.sh" <<EOF
 #!/system/bin/sh
-# Installed by AnyKernel3 (extra asset) — run this from a boot-scripts
-# module (e.g. via Magisk/KSU post-fs-data.d) to spoof TTL/hop-limit.
 sysctl -w net.ipv4.ip_default_ttl=${TTL_SPOOF_DEFAULT_VALUE}
 for f in /proc/sys/net/ipv6/conf/*/hop_limit; do
   echo ${TTL_SPOOF_DEFAULT_VALUE} > "\$f" 2>/dev/null || true
@@ -134,21 +127,16 @@ EOF
 fi
 
 if [ "${FEATURE_DROIDSPACE:-false}" = "true" ]; then
-  echo "==> Enabling DroidSpace (namespace/cgroup) kernel prerequisites"
+  echo "==> Enabling DroidSpace prerequisites"
   append_defconfig "$DROIDSPACE_DEFCONFIG"
-  echo "Note: DroidSpace itself (droidspaces.org) is installed on-device as an app, not compiled into the kernel — this step only turns on the kernel configs it needs."
 fi
 
 if [ "${FEATURE_F2FS_OPT:-false}" = "true" ]; then
-  echo "==> Enabling F2FS optimizations (compression, xattr/ACL)"
-  
-  # --- [PATCH] Fix F2FS missing FI_COMPRESS_RELEASED flag ---
+  echo "==> Enabling F2FS optimizations"
   F2FS_H="$KERNEL_DIR/fs/f2fs/f2fs.h"
   if [ -f "$F2FS_H" ] && ! grep -q "FI_COMPRESS_RELEASED" "$F2FS_H"; then
-      echo "⚙️ Patching FI_COMPRESS_RELEASED in F2FS..."
       sed -i '/FI_NO_EXTENT/a \	FI_COMPRESS_RELEASED,' "$F2FS_H"
   fi
-
   append_defconfig "$F2FS_OPT_DEFCONFIG"
 fi
 
