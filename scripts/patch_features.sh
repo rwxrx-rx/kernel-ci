@@ -23,6 +23,21 @@ if [ -f "$KERNEL_DIR/drivers/kernelsu/sulog/event.c" ]; then
   sed -i 's/get_monotonic_boottime(&ts)/ktime_get_boottime_ts64(\&ts)/g' "$KERNEL_DIR/drivers/kernelsu/sulog/event.c"
 fi
 
+# fix undefined symbols for KernelSU Builds
+KSU_MAIN="$KERNEL_DIR/drivers/kernelsu/main.c"
+if [ -f "$KSU_MAIN" ] && ! grep -q "Fallback stubs" "$KSU_MAIN"; then
+  echo "==> Injecting fallback stubs for KernelSU undefined symbols"
+  cat << 'EOF' >> "$KSU_MAIN"
+
+/* Fallback stubs for undefined symbols to fix LTO/Linker errors */
+struct input_dev;
+bool __attribute__((weak)) ksu_input_hook(struct input_dev *dev, unsigned int type, unsigned int code, int value) {
+    return false;
+}
+void __attribute__((weak)) setenforce(int enforcing) {}
+EOF
+fi
+
 if [ "${FEATURE_TCP_BBR:-false}" = "true" ] && [ "${FEATURE_TCP_WESTWOOD:-false}" = "true" ]; then
   echo "::error::TCP BBR and Westwood can't both be the default congestion control — enable only one."
   exit 1
@@ -31,14 +46,14 @@ fi
 if [ "${FEATURE_WIREGUARD:-false}" = "true" ]; then
   echo "==> Enabling WireGuard"
   
-  # Hapus WireGuard bawaan kernel agar tidak terjadi duplicate symbol
+  # Remove built-in WireGuard to prevent duplicate symbol errors
   rm -rf "$KERNEL_DIR/drivers/net/wireguard" "$KERNEL_DIR/net/wireguard"
   sed -i '/wireguard/d' "$KERNEL_DIR/drivers/net/Kconfig" 2>/dev/null || true
   sed -i '/wireguard/d' "$KERNEL_DIR/drivers/net/Makefile" 2>/dev/null || true
   sed -i '/wireguard/d' "$KERNEL_DIR/net/Kconfig" 2>/dev/null || true
   sed -i '/wireguard/d' "$KERNEL_DIR/net/Makefile" 2>/dev/null || true
 
-  # Clone dan pasang WireGuard baru
+  # Clone and setup new WireGuard
   git clone --depth=1 -b "$WIREGUARD_BRANCH" "$WIREGUARD_REPO" "$GITHUB_WORKSPACE/wireguard-src"
   mkdir -p "$KERNEL_DIR/net/wireguard"
   cp -r "$GITHUB_WORKSPACE/wireguard-src/src/"* "$KERNEL_DIR/net/wireguard/"
