@@ -73,7 +73,7 @@ if [ -d "$KSU_DIR" ]; then
   echo "==> Forcing manual hook mode in $KSU_DIR (disabling CONFIG_KPROBES paths)"
   grep -rl '#ifdef CONFIG_KPROBES' "$KSU_DIR" 2>/dev/null | while read -r f; do
     sed -i 's/#ifdef CONFIG_KPROBES/#if defined(CONFIG_KPROBES) \&\& 0/' "$f"
-  done
+  done || true
 fi
 
 # Make sure the defconfig actually enables KSU

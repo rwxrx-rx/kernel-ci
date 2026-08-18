@@ -28,14 +28,6 @@ jobs:
           esac
           echo "repo=$REPO" >> "$GITHUB_OUTPUT"
 
-      # NOTE on "one universal manager APK": every KSU fork ships its own
-      # manager because the manager talks to the kernel driver over a
-      # fork-specific ioctl/prctl contract — there isn't a single upstream
-      # APK that's actually compatible with all forks at once. What this
-      # job gives you instead is "one workflow that builds the right
-      # manager for whichever fork you picked", which is the practical
-      # version of that same convenience. If a specific fork later ships
-      # a truly cross-compatible manager, just point REPO at it above.
       - name: Clone manager source
         if: steps.resolve.outputs.repo != ''
         run: git clone --depth=1 --recurse-submodules "${{ steps.resolve.outputs.repo }}" manager-src
@@ -45,18 +37,15 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          # Fix: Updated Java version from 17 to 21
+          java-version: "21"
 
       - name: Locate and build manager APK
         if: steps.resolve.outputs.repo != ''
         run: |
-          # Don't assume gradlew lives at the repo root — forks vary
-          # (KernelSU-Next/SukiSU-Ultra keep it at root, but not every
-          # fork does). Find whichever directory actually has it.
           GRADLE_FILE=$(find manager-src -maxdepth 4 -name gradlew | head -n1)
           if [ -z "$GRADLE_FILE" ]; then
-            echo "::error::No gradlew found anywhere under manager-src (up to 4 levels deep). This fork's manager may live in a separate repo — check ${{ steps.resolve.outputs.repo }} manually and update the REPO in this workflow's resolve step."
-            find manager-src -maxdepth 2 -type d
+            echo "::error::No gradlew found anywhere under manager-src. Check ${{ steps.resolve.outputs.repo }} manually."
             exit 1
           fi
           GRADLE_DIR=$(dirname "$GRADLE_FILE")
