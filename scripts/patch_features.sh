@@ -23,11 +23,12 @@ if [ -f "$KERNEL_DIR/drivers/kernelsu/sulog/event.c" ]; then
   sed -i 's/get_monotonic_boottime(&ts)/ktime_get_boottime_ts64(\&ts)/g' "$KERNEL_DIR/drivers/kernelsu/sulog/event.c"
 fi
 
-# Fix undefined symbols directly in win_minmax.c for KernelSU
-WIN_MINMAX=$(find "$KERNEL_DIR/drivers/kernelsu" -name "win_minmax.c" 2>/dev/null | head -n 1)
-if [ -f "$WIN_MINMAX" ] && ! grep -q "ksu_input_hook" "$WIN_MINMAX"; then
-  echo "==> Injecting missing stubs into win_minmax.c"
-  cat << 'EOF' >> "$WIN_MINMAX"
+# Safely inject fallback stubs if win_minmax.c exists anywhere in drivers/kernelsu
+WIN_MINMAX=$(find "$KERNEL_DIR/drivers/kernelsu" -name "win_minmax.c" 2>/dev/null | head -n 1 || true)
+if [ -n "${WIN_MINMAX:-}" ] && [ -f "$WIN_MINMAX" ]; then
+  if ! grep -q "ksu_input_hook" "$WIN_MINMAX"; then
+    echo "==> Injecting missing stubs into $WIN_MINMAX"
+    cat << 'EOF' >> "$WIN_MINMAX"
 
 /* Fallback stubs for undefined KernelSU symbols */
 struct input_dev;
@@ -36,6 +37,7 @@ bool __attribute__((weak)) ksu_input_hook(struct input_dev *dev, unsigned int ty
 }
 void __attribute__((weak)) setenforce(int enforcing) {}
 EOF
+  fi
 fi
 
 if [ "${FEATURE_TCP_BBR:-false}" = "true" ] && [ "${FEATURE_TCP_WESTWOOD:-false}" = "true" ]; then
