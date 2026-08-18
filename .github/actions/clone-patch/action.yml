@@ -50,14 +50,15 @@ runs:
     - name: Load manifests
       shell: bash
       run: |
-        # device.env / ksu-variants.env are single-line KEY=value only,
-        # safe to dump into $GITHUB_ENV directly. features.env has
-        # multi-line values (several CONFIG_ lines per feature), which
-        # $GITHUB_ENV's simple KEY=value format can't represent — that
-        # file gets `source`d straight from disk in patch_features.sh
-        # instead, not routed through $GITHUB_ENV.
-        cat manifest/device.env >> "$GITHUB_ENV"
-        cat manifest/ksu-variants.env >> "$GITHUB_ENV"
+        source manifest/device.env
+        grep -o '^[A-Z_0-9]\+' manifest/device.env | while read -r KEY; do
+          echo "$KEY=${!KEY}" >> "$GITHUB_ENV"
+        done
+
+        source manifest/ksu-variants.env
+        grep -o '^[A-Z_0-9]\+' manifest/ksu-variants.env | while read -r KEY; do
+          echo "$KEY=${!KEY}" >> "$GITHUB_ENV"
+        done
 
     - name: Clone kernel source
       shell: bash
@@ -73,10 +74,6 @@ runs:
         DT_BRANCH="${DT_BRANCH:-main}"
         echo "Swapping in device tree: ${{ inputs.device_tree_repo }} @ $DT_BRANCH"
         git clone --depth=1 -b "$DT_BRANCH" "${{ inputs.device_tree_repo }}" devicetree
-        # Convention: device tree repos for this kernel drop their contents
-        # under arch/<ARCH>/boot/dts/vendor/<oem>/ and/or arch/<ARCH>/configs/.
-        # Adjust the destination(s) below to match how YOUR device tree repo
-        # is laid out if it differs.
         rsync -a devicetree/ kernel/
         rm -rf devicetree
 
@@ -98,7 +95,7 @@ runs:
       shell: bash
       run: bash "$GITHUB_WORKSPACE/scripts/patch_overlayfs_mountify.sh"
 
-    - name: Inject optional features (WireGuard, BBG, ThinLTO+O3, ZRAM zstd, BBR/Westwood, TTL spoof, DroidSpace)
+    - name: Inject optional features
       shell: bash
       env:
         FEATURE_WIREGUARD: ${{ inputs.feature_wireguard }}
