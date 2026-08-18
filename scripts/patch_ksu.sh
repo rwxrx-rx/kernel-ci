@@ -71,9 +71,14 @@ echo "KSU_DIR=$KSU_DIR" >> "$GITHUB_ENV"
 # those call sites into the kernel tree itself, not just the driver dir).
 if [ -d "$KSU_DIR" ]; then
   echo "==> Forcing manual hook mode in $KSU_DIR (disabling CONFIG_KPROBES paths)"
+  # grep exits 1 (not an error — just "no matches") when this fork's
+  # legacy branch already ships without any CONFIG_KPROBES ifdef guard
+  # (i.e. it's manual-hook-only already). Under `set -e -o pipefail`
+  # that 1 would otherwise kill the whole script here with no message,
+  # so the `|| true` is required, not cosmetic.
   grep -rl '#ifdef CONFIG_KPROBES' "$KSU_DIR" 2>/dev/null | while read -r f; do
     sed -i 's/#ifdef CONFIG_KPROBES/#if defined(CONFIG_KPROBES) \&\& 0/' "$f"
-  done
+  done || true
 fi
 
 # Make sure the defconfig actually enables KSU
