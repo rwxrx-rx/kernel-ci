@@ -6,6 +6,13 @@
 # then loose fs/ + include/linux/ files copied in directly.
 set -euo pipefail
 
+# Check if KSU variant is vanilla/none. If so, skip SUSFS entirely.
+# This prevents the script from failing on matrix builds that don't export KSU_DIR.
+if [ "${KSU_VARIANT:-}" = "none" ]; then
+  echo "KSU_VARIANT is 'none'. Skipping SUSFS integration for vanilla kernel."
+  exit 0
+fi
+
 : "${KERNEL_DIR:?KERNEL_DIR not set}"
 : "${KSU_DIR:?KSU_DIR not set (patch_ksu.sh must run first)}"
 : "${SUSFS_REPO:?}"
