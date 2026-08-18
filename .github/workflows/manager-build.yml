@@ -1,0 +1,79 @@
+name: Build Manager
+
+on:
+  workflow_call:
+    inputs:
+      ksu_variant:
+        required: true
+        type: string
+
+jobs:
+  manager:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve manager repo for variant
+        id: resolve
+        run: |
+          case "${{ inputs.ksu_variant }}" in
+            kernelsu-next-legacy) REPO="https://github.com/KernelSU-Next/KernelSU-Next" ;;
+            resukisu)              REPO="https://github.com/ReSukiSU/ReSukiSU" ;;
+            sukisu-ultra)          REPO="https://github.com/SukiSU-Ultra/SukiSU-Ultra" ;;
+            wildksu)                REPO="https://github.com/WildKernels/GKI_KernelSU_SUSFS" ;;
+            xxksu)
+              echo "::error::xxKSU manager repo not configured — set it in this job before using component=manager with xxksu"
+              exit 1 ;;
+            *) REPO="" ;;
+          esac
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+
+      # NOTE on "one universal manager APK": every KSU fork ships its own
+      # manager because the manager talks to the kernel driver over a
+      # fork-specific ioctl/prctl contract — there isn't a single upstream
+      # APK that's actually compatible with all forks at once. What this
+      # job gives you instead is "one workflow that builds the right
+      # manager for whichever fork you picked", which is the practical
+      # version of that same convenience. If a specific fork later ships
+      # a truly cross-compatible manager, just point REPO at it above.
+      - name: Clone manager source
+        if: steps.resolve.outputs.repo != ''
+        run: git clone --depth=1 --recurse-submodules "${{ steps.resolve.outputs.repo }}" manager-src
+
+      - name: Set up JDK
+        if: steps.resolve.outputs.repo != ''
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Locate and build manager APK
+        if: steps.resolve.outputs.repo != ''
+        run: |
+          # Don't assume gradlew lives at the repo root — forks vary
+          # (KernelSU-Next/SukiSU-Ultra keep it at root, but not every
+          # fork does). Find whichever directory actually has it.
+          GRADLE_FILE=$(find manager-src -maxdepth 4 -name gradlew | head -n1)
+          if [ -z "$GRADLE_FILE" ]; then
+            echo "::error::No gradlew found anywhere under manager-src (up to 4 levels deep). This fork's manager may live in a separate repo — check ${{ steps.resolve.outputs.repo }} manually and update the REPO in this workflow's resolve step."
+            find manager-src -maxdepth 2 -type d
+            exit 1
+          fi
+          GRADLE_DIR=$(dirname "$GRADLE_FILE")
+          echo "Found gradle project at $GRADLE_DIR"
+          cd "$GRADLE_DIR"
+          chmod +x gradlew
+          ./gradlew :manager:assembleRelease || ./gradlew assembleRelease
+
+      - name: Collect APK
+        if: steps.resolve.outputs.repo != ''
+        run: |
+          mkdir -p manager-out
+          find manager-src -name '*.apk' -path '*release*' -exec cp {} manager-out/ \;
+
+      - uses: actions/upload-artifact@v4
+        if: steps.resolve.outputs.repo != ''
+        with:
+          name: manager-${{ inputs.ksu_variant }}
+          path: manager-out/*.apk
+          if-no-files-found: warn

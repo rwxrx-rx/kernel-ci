@@ -1,0 +1,64 @@
+name: "Setup Toolchain"
+description: "Downloads/caches the selected clang flavor (aosp-clang or proton-clang)"
+
+inputs:
+  clang:
+    description: "Which clang flavor: aosp-clang | proton-clang"
+    required: true
+
+outputs:
+  toolchain-dir:
+    description: "Absolute path to the toolchain bin dir, prepend to $PATH"
+    value: ${{ steps.resolve.outputs.dir }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Load toolchain manifest
+      shell: bash
+      run: cat manifest/toolchains.env >> "$GITHUB_ENV"
+
+    - name: Cache toolchain
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: toolchain
+        key: toolchain-${{ inputs.clang }}-${{ runner.os }}-v1
+
+    - name: Fetch ProtonClang
+      if: inputs.clang == 'proton-clang' && steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        git clone --depth=1 -b "$PROTON_CLANG_BRANCH" "$PROTON_CLANG_REPO" toolchain
+
+    - name: Fetch AOSP Clang
+      if: inputs.clang == 'aosp-clang' && steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        mkdir -p toolchain
+        git clone --depth=1 -b "$AOSP_CLANG_REF" "$AOSP_CLANG_REPO" aosp-clang-src
+        # AOSP's linux-x86 prebuilts repo stores each release under its own dir
+        if [ -d "aosp-clang-src/$AOSP_CLANG_SUBDIR" ]; then
+          mv "aosp-clang-src/$AOSP_CLANG_SUBDIR"/* toolchain/
+        else
+          echo "::error::AOSP_CLANG_SUBDIR ($AOSP_CLANG_SUBDIR) not found in prebuilts repo — update manifest/toolchains.env"
+          exit 1
+        fi
+        rm -rf aosp-clang-src
+
+    - name: Fetch GCC (binutils fallback, arm64+arm32)
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        git clone --depth=1 "$GCC64_REPO" toolchain/gcc64
+        git clone --depth=1 "$GCC32_REPO" toolchain/gcc32
+
+    - name: Resolve bin dir
+      id: resolve
+      shell: bash
+      run: |
+        DIR="$GITHUB_WORKSPACE/toolchain/bin"
+        echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+        echo "$DIR" >> "$GITHUB_PATH"
+        echo "$GITHUB_WORKSPACE/toolchain/gcc64/bin" >> "$GITHUB_PATH"
+        echo "$GITHUB_WORKSPACE/toolchain/gcc32/bin" >> "$GITHUB_PATH"

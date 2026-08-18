@@ -1,0 +1,112 @@
+name: "Clone + Patch"
+description: "Clones kernel source (+ optional device tree overlay), integrates the chosen KernelSU fork, susfs4ksu, and OverlayFS/Mountify support"
+
+inputs:
+  ksu_variant:
+    description: "none | kernelsu-next-legacy | resukisu | xxksu | sukisu-ultra | wildksu"
+    required: true
+  susfs:
+    description: "true/false — patch susfs4ksu on top of the KSU fork"
+    required: true
+  overlayfs_mountify:
+    description: "true/false — enable CONFIG_OVERLAY_FS and stage the Mountify module"
+    required: true
+  feature_wireguard:
+    required: false
+    default: "false"
+  feature_baseband_guard:
+    required: false
+    default: "false"
+  feature_thinlto_o3:
+    required: false
+    default: "false"
+  feature_zram_zstd:
+    required: false
+    default: "false"
+  feature_tcp_bbr:
+    required: false
+    default: "false"
+  feature_tcp_westwood:
+    required: false
+    default: "false"
+  feature_ttl_spoof:
+    required: false
+    default: "false"
+  feature_droidspace:
+    required: false
+    default: "false"
+  device_tree_repo:
+    description: "Override device tree repo (blank = none / tree already in kernel repo)"
+    required: false
+    default: ""
+  device_tree_branch:
+    description: "Override device tree branch"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Load manifests
+      shell: bash
+      run: |
+        # device.env / ksu-variants.env are single-line KEY=value only,
+        # safe to dump into $GITHUB_ENV directly. features.env has
+        # multi-line values (several CONFIG_ lines per feature), which
+        # $GITHUB_ENV's simple KEY=value format can't represent — that
+        # file gets `source`d straight from disk in patch_features.sh
+        # instead, not routed through $GITHUB_ENV.
+        cat manifest/device.env >> "$GITHUB_ENV"
+        cat manifest/ksu-variants.env >> "$GITHUB_ENV"
+
+    - name: Clone kernel source
+      shell: bash
+      run: |
+        git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel
+        echo "KERNEL_DIR=$GITHUB_WORKSPACE/kernel" >> "$GITHUB_ENV"
+
+    - name: Overlay a custom device tree (optional)
+      if: inputs.device_tree_repo != ''
+      shell: bash
+      run: |
+        DT_BRANCH="${{ inputs.device_tree_branch }}"
+        DT_BRANCH="${DT_BRANCH:-main}"
+        echo "Swapping in device tree: ${{ inputs.device_tree_repo }} @ $DT_BRANCH"
+        git clone --depth=1 -b "$DT_BRANCH" "${{ inputs.device_tree_repo }}" devicetree
+        # Convention: device tree repos for this kernel drop their contents
+        # under arch/<ARCH>/boot/dts/vendor/<oem>/ and/or arch/<ARCH>/configs/.
+        # Adjust the destination(s) below to match how YOUR device tree repo
+        # is laid out if it differs.
+        rsync -a devicetree/ kernel/
+        rm -rf devicetree
+
+    - name: Patch selected KernelSU fork
+      shell: bash
+      env:
+        KSU_VARIANT: ${{ inputs.ksu_variant }}
+      run: bash "$GITHUB_WORKSPACE/scripts/patch_ksu.sh"
+
+    - name: Patch susfs4ksu
+      if: inputs.susfs == 'true' && inputs.ksu_variant != 'none'
+      shell: bash
+      env:
+        KSU_VARIANT: ${{ inputs.ksu_variant }}
+      run: bash "$GITHUB_WORKSPACE/scripts/patch_susfs.sh"
+
+    - name: Enable OverlayFS + stage Mountify
+      if: inputs.overlayfs_mountify == 'true'
+      shell: bash
+      run: bash "$GITHUB_WORKSPACE/scripts/patch_overlayfs_mountify.sh"
+
+    - name: Inject optional features (WireGuard, BBG, ThinLTO+O3, ZRAM zstd, BBR/Westwood, TTL spoof, DroidSpace)
+      shell: bash
+      env:
+        FEATURE_WIREGUARD: ${{ inputs.feature_wireguard }}
+        FEATURE_BASEBAND_GUARD: ${{ inputs.feature_baseband_guard }}
+        FEATURE_THINLTO_O3: ${{ inputs.feature_thinlto_o3 }}
+        FEATURE_ZRAM_ZSTD: ${{ inputs.feature_zram_zstd }}
+        FEATURE_TCP_BBR: ${{ inputs.feature_tcp_bbr }}
+        FEATURE_TCP_WESTWOOD: ${{ inputs.feature_tcp_westwood }}
+        FEATURE_TTL_SPOOF: ${{ inputs.feature_ttl_spoof }}
+        FEATURE_DROIDSPACE: ${{ inputs.feature_droidspace }}
+      run: bash "$GITHUB_WORKSPACE/scripts/patch_features.sh"

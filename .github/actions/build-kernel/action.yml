@@ -1,0 +1,57 @@
+name: "Build Kernel"
+description: "Runs make olddefconfig + make with the resolved clang toolchain"
+
+inputs:
+  clang:
+    required: true
+  jobs:
+    required: false
+    default: "$(nproc --all)"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Load device manifest
+      shell: bash
+      run: cat manifest/device.env >> "$GITHUB_ENV"
+
+    - name: Build
+      shell: bash
+      env:
+        CLANG_FLAVOR: ${{ inputs.clang }}
+      run: |
+        cd "$KERNEL_DIR"
+
+        MAKE_ARGS=(
+          ARCH="$ARCH"
+          O=out
+          CC=clang
+          CLANG_TRIPLE=aarch64-linux-gnu-
+          CROSS_COMPILE=aarch64-linux-android-
+          CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          LLVM=1
+          LLVM_IAS=1
+        )
+
+        make "${MAKE_ARGS[@]}" "$DEFCONFIG"
+        make "${MAKE_ARGS[@]}" -j"${{ inputs.jobs }}" 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+        IMG="out/arch/${ARCH}/boot/Image.gz-dtb"
+        [ -f "$IMG" ] || IMG="out/arch/${ARCH}/boot/Image.gz"
+        [ -f "$IMG" ] || IMG="out/arch/${ARCH}/boot/Image"
+        if [ ! -f "$IMG" ]; then
+          echo "::error::No kernel Image found under out/arch/${ARCH}/boot/ — check build.log"
+          exit 1
+        fi
+        mkdir -p "$GITHUB_WORKSPACE/out"
+        cp "$IMG" "$GITHUB_WORKSPACE/out/Image"
+        find out/arch/"$ARCH"/boot -name '*.dtb' -exec cp {} "$GITHUB_WORKSPACE/out/" \; || true
+        find out/arch/"$ARCH"/boot -name '*dtbo*.img' -exec cp {} "$GITHUB_WORKSPACE/out/" \; || true
+
+    - name: Upload build log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log-${{ inputs.clang }}
+        path: build.log
+        retention-days: 7

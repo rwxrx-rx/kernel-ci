@@ -1,0 +1,182 @@
+name: Build Kernel (Camellia)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_target:
+        description: "Which variant(s) to build"
+        type: choice
+        default: both
+        options: [vanilla, ksu, both]
+      component:
+        description: "Which component(s) to build"
+        type: choice
+        default: kernel
+        options: [kernel, manager, both]
+      ksu_variant:
+        description: "KernelSU fork (used when build_target includes ksu)"
+        type: choice
+        default: kernelsu-next-legacy
+        options:
+          - kernelsu-next-legacy
+          - resukisu
+          - xxksu
+          - sukisu-ultra
+          - wildksu
+      clang:
+        description: "Toolchain"
+        type: choice
+        default: proton-clang
+        options: [proton-clang, aosp-clang]
+      susfs:
+        description: "Integrate susfs4ksu 2.2.0"
+        type: boolean
+        default: true
+      overlayfs_mountify:
+        description: "Enable OverlayFS + stage Mountify module"
+        type: boolean
+        default: true
+      feature_wireguard:
+        description: "[Feature] WireGuard"
+        type: boolean
+        default: false
+      feature_baseband_guard:
+        description: "[Feature] Baseband-guard (BBG)"
+        type: boolean
+        default: false
+      feature_thinlto_o3:
+        description: "[Feature] ThinLTO + -O3"
+        type: boolean
+        default: false
+      feature_zram_zstd:
+        description: "[Feature] ZRAM + zstd"
+        type: boolean
+        default: false
+      feature_tcp_bbr:
+        description: "[Feature] TCP BBR (mutually exclusive with Westwood)"
+        type: boolean
+        default: false
+      feature_tcp_westwood:
+        description: "[Feature] TCP Westwood (mutually exclusive with BBR)"
+        type: boolean
+        default: false
+      feature_ttl_spoof:
+        description: "[Feature] TTL/Hop-Limit spoof (sysctl, see manifest/features.env)"
+        type: boolean
+        default: false
+      feature_droidspace:
+        description: "[Feature] DroidSpace kernel prerequisites (namespaces/cgroups)"
+        type: boolean
+        default: false
+      device_tree_repo:
+        description: "Override device tree repo (blank = use manifest default)"
+        type: string
+        default: ""
+      device_tree_branch:
+        description: "Override device tree branch"
+        type: string
+        default: ""
+      release_channel:
+        description: "Where to publish the result"
+        type: choice
+        default: both
+        options: [none, github, telegram, both]
+
+concurrency:
+  group: build-kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        run: |
+          case "${{ inputs.build_target }}" in
+            vanilla) echo 'matrix=[{"suffix":"vanilla","ksu_variant":"none"}]' >> "$GITHUB_OUTPUT" ;;
+            ksu)     echo "matrix=[{\"suffix\":\"${{ inputs.ksu_variant }}\",\"ksu_variant\":\"${{ inputs.ksu_variant }}\"}]" >> "$GITHUB_OUTPUT" ;;
+            both)    echo "matrix=[{\"suffix\":\"vanilla\",\"ksu_variant\":\"none\"},{\"suffix\":\"${{ inputs.ksu_variant }}\",\"ksu_variant\":\"${{ inputs.ksu_variant }}\"}]" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  build-kernel:
+    if: inputs.component == 'kernel' || inputs.component == 'both'
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+    outputs:
+      artifact-names: ${{ steps.collect.outputs.names }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+
+      - uses: ./.github/actions/setup-toolchain
+        id: toolchain
+        with:
+          clang: ${{ inputs.clang }}
+
+      - uses: ./.github/actions/clone-patch
+        with:
+          ksu_variant: ${{ matrix.ksu_variant }}
+          susfs: ${{ inputs.susfs }}
+          overlayfs_mountify: ${{ inputs.overlayfs_mountify }}
+          feature_wireguard: ${{ inputs.feature_wireguard }}
+          feature_baseband_guard: ${{ inputs.feature_baseband_guard }}
+          feature_thinlto_o3: ${{ inputs.feature_thinlto_o3 }}
+          feature_zram_zstd: ${{ inputs.feature_zram_zstd }}
+          feature_tcp_bbr: ${{ inputs.feature_tcp_bbr }}
+          feature_tcp_westwood: ${{ inputs.feature_tcp_westwood }}
+          feature_ttl_spoof: ${{ inputs.feature_ttl_spoof }}
+          feature_droidspace: ${{ inputs.feature_droidspace }}
+          device_tree_repo: ${{ inputs.device_tree_repo }}
+          device_tree_branch: ${{ inputs.device_tree_branch }}
+
+      - uses: ./.github/actions/build-kernel
+        with:
+          clang: ${{ inputs.clang }}
+
+      - uses: ./.github/actions/package-anykernel
+        id: package
+        with:
+          variant-suffix: ${{ matrix.suffix }}
+
+      - name: Generate changelog for this variant
+        env:
+          KSU_VARIANT: ${{ matrix.ksu_variant }}
+          CLANG_FLAVOR: ${{ inputs.clang }}
+          SUSFS_ENABLED: ${{ inputs.susfs }}
+          OVERLAYFS_ENABLED: ${{ inputs.overlayfs_mountify }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/gen_changelog.sh
+
+      - name: Upload changelog + extras
+        uses: actions/upload-artifact@v4
+        with:
+          name: changelog-${{ matrix.suffix }}
+          path: |
+            changelog.md
+            changelog_telegram.txt
+            out/extra/*
+          if-no-files-found: ignore
+
+  build-manager:
+    if: inputs.component == 'manager' || inputs.component == 'both'
+    uses: ./.github/workflows/manager-build.yml
+    with:
+      ksu_variant: ${{ inputs.ksu_variant }}
+
+  release:
+    if: always() && inputs.release_channel != 'none' && (needs.build-kernel.result == 'success' || needs.build-manager.result == 'success')
+    needs: [build-kernel, build-manager]
+    uses: ./.github/workflows/release.yml
+    with:
+      release_channel: ${{ inputs.release_channel }}
+      run_id: ${{ github.run_id }}
+    secrets: inherit
