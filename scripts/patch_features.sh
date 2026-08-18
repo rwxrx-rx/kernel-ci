@@ -11,7 +11,7 @@ source "$GITHUB_WORKSPACE/manifest/features.env"
 DEFCONFIG_PATH="$KERNEL_DIR/arch/${ARCH}/configs/${DEFCONFIG}"
 
 append_defconfig() {
-  # Cegah error jika parameter yang dikirim kosong
+  # Safely handle empty parameters
   [ -z "${1:-}" ] && return 0
   
   while IFS= read -r line; do
@@ -22,13 +22,15 @@ append_defconfig() {
   done <<< "$1"
 }
 
-# 1. KSU event.c boottime patch (Cari otomatis dimana pun letaknya)
+# 1. Fix KSU boottime (timespec mismatch on kernel 4.14)
 for EVENT_C in $(find "$KERNEL_DIR" -type f -path "*/kernelsu*/event.c" 2>/dev/null); do
-  sed -i 's/get_monotonic_boottime(&ts)/ktime_get_boottime_ts64(\&ts)/g' "$EVENT_C"
+  echo "==> Fixing boottime struct in $EVENT_C"
+  # Force KSU to use 32-bit timespec
+  sed -i 's/struct timespec64 ts;/struct timespec ts;/g' "$EVENT_C"
+  sed -i 's/ktime_get_boottime_ts64(&ts)/get_monotonic_boottime(\&ts)/g' "$EVENT_C"
 done
 
-# 2. Fix KSU Undefined Symbols (setenforce & ksu_input_hook)
-# Menyuntikkan stubs ke main.c dan win_minmax.c agar linker aman 100%
+# 2. Fix KSU undefined symbols (setenforce & ksu_input_hook)
 for KSU_FILE in $(find "$KERNEL_DIR" -type f \( -name "main.c" -o -name "win_minmax.c" \) -path "*/kernelsu*" 2>/dev/null); do
   if ! grep -q "ksu_input_hook" "$KSU_FILE"; then
     echo "==> Injecting fallback stubs into $KSU_FILE"
@@ -60,7 +62,6 @@ if [ "${FEATURE_WIREGUARD:-false}" = "true" ]; then
   sed -i '/wireguard/d' "$KERNEL_DIR/net/Kconfig" 2>/dev/null || true
   sed -i '/wireguard/d' "$KERNEL_DIR/net/Makefile" 2>/dev/null || true
 
-  # Gunakan variabel aman jika repo/branch tidak terdefinisi
   WG_REPO="${WIREGUARD_REPO:-https://github.com/WireGuard/wireguard-linux-compat.git}"
   WG_BRANCH="${WIREGUARD_BRANCH:-master}"
   
