@@ -107,7 +107,7 @@ jobs:
   build-kernel:
     if: inputs.component == 'kernel' || inputs.component == 'both'
     needs: plan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
