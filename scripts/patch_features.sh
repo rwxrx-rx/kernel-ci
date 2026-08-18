@@ -68,24 +68,8 @@ if [ "${FEATURE_BASEBAND_GUARD:-false}" = "true" ]; then
   
   BBG_TRACING="$KERNEL_DIR/security/baseband-guard/tracing/tracing.c"
   if [ -f "$BBG_TRACING" ]; then
-      python3 -c '
-path = "'"$BBG_TRACING"'"
-with open(path, "r") as f: text = f.read()
-
-if "selinux_cred" in text and "static inline struct task_security_struct *selinux_cred" not in text:
-    helper = """
-#ifndef HAVE_SELINUX_CRED
-static inline struct task_security_struct *selinux_cred(const struct cred *cred)
-{
-    return container_of(cred->security, struct task_security_struct, sec);
-}
-#define HAVE_SELINUX_CRED
-#endif
-"""
-    text = helper + text
-
-with open(path, "w") as f: f.write(text)
-'
+      # Ganti nama fungsi agar tidak bentrok dengan selinux bawaan kernel
+      sed -i 's/selinux_cred(/bbg_selinux_cred(/g' "$BBG_TRACING"
   fi
 
   append_defconfig "$BBG_DEFCONFIG"
