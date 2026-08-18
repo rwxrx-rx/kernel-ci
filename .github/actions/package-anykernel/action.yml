@@ -17,7 +17,7 @@ runs:
   steps:
     - name: Load device manifest
       shell: bash
-      run: grep -v '^\s*#' manifest/device.env | grep -v '^\s*$' >> "$GITHUB_ENV"
+      run: bash scripts/load_manifest.sh manifest/device.env
 
     - name: Build zip
       id: zip

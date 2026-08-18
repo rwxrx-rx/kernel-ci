@@ -63,3 +63,7 @@ if [ "$DOC_HTTP_CODE" != "200" ] || ! grep -q '"ok":true' /tmp/tg_doc.json; then
   echo "::error::Telegram sendDocument failed for ${ZIP_NAME} (HTTP $DOC_HTTP_CODE):"
   cat /tmp/tg_doc.json
 fi
+
+if [ -n "${TG_PROGRESS_MSG_ID:-}" ]; then
+  tg_edit_message "$TG_PROGRESS_MSG_ID" "✅ Build complete — ${ZIP_NAME}"
+fi
