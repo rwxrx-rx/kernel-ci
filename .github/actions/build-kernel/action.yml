@@ -21,15 +21,34 @@ runs:
         CLANG_FLAVOR: ${{ inputs.clang }}
       run: |
         cd "$KERNEL_DIR"
+        DEFCONFIG_PATH="arch/${ARCH}/configs/${DEFCONFIG}"
 
-        # apply KernelSU fix if the file exists (safe for vanilla builds)
         if [ -f "drivers/kernelsu/sulog/event.c" ]; then
           sed -i 's/get_monotonic_boottime(&ts)/ktime_get_boottime_ts64(\&ts)/g' drivers/kernelsu/sulog/event.c
         fi
 
-        # apply WireGuard fix if the file exists (safe for vanilla builds)
-        if [ -f "net/wireguard/compat/compat.h" ]; then
-          sed -i 's/struct timespec {/struct timespec_wg_dummy {/g' net/wireguard/compat/compat.h
+        rm -rf drivers/net/wireguard net/wireguard /tmp/wireguard
+        sed -i '/wireguard/d' drivers/net/Kconfig 2>/dev/null || true
+        sed -i '/wireguard/d' drivers/net/Makefile 2>/dev/null || true
+        sed -i '/wireguard/d' net/Kconfig 2>/dev/null || true
+        sed -i '/wireguard/d' net/Makefile 2>/dev/null || true
+
+        git clone --depth=1 https://github.com/WireGuard/wireguard-linux-compat.git /tmp/wireguard
+        cp -r /tmp/wireguard/src net/wireguard
+
+        if [ -f "include/uapi/linux/time_types.h" ]; then
+          if [ -f "net/wireguard/compat/compat.h" ]; then
+            sed -i '/struct __kernel_timespec {/,/};/s/^/\/\//' net/wireguard/compat/compat.h
+          fi
+        fi
+
+        sed -i '/endmenu/i source "net/wireguard/Kconfig"' net/Kconfig || echo 'source "net/wireguard/Kconfig"' >> net/Kconfig
+        echo 'obj-$(CONFIG_WIREGUARD) += wireguard/' >> net/Makefile
+        rm -rf /tmp/wireguard
+
+        if [ -f "$DEFCONFIG_PATH" ]; then
+          sed -i "/^#\? *CONFIG_WIREGUARD[ =]/d" "$DEFCONFIG_PATH"
+          echo "CONFIG_WIREGUARD=y" >> "$DEFCONFIG_PATH"
         fi
 
         MAKE_ARGS=(
