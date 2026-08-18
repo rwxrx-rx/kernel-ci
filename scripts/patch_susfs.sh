@@ -44,9 +44,18 @@ cp "$WORK"/kernel_patches/fs/* fs/ 2>/dev/null || true
 cp "$WORK"/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
 
 echo "==> Applying KernelSU-side susfs patch"
-if [ -f "$KSU_DIR/10_enable_susfs_for_ksu.patch" ]; then
-  ( cd "$KSU_DIR" && patch -p1 --fuzz=3 < 10_enable_susfs_for_ksu.patch ) \
-    || echo "::warning::10_enable_susfs_for_ksu.patch had rejects — check ${KSU_DIR}/*.rej"
+# Check if the selected KSU variant already has SUSFS integrated natively.
+# Applying the patch on top of these variants will corrupt selinux.c syntax
+# and cause "function definition is not allowed here" compilation errors.
+if [[ "${KSU_VARIANT:-}" == "resukisu" || "${KSU_VARIANT:-}" == "sukisu-ultra" || "${KSU_VARIANT:-}" == "xxksu" ]]; then
+  echo "  Skipping 10_enable_susfs_for_ksu.patch since KSU_VARIANT '${KSU_VARIANT}' usually has SUSFS built-in."
+else
+  if [ -f "$KSU_DIR/10_enable_susfs_for_ksu.patch" ]; then
+    # Reduced --fuzz from 3 to 1 to prevent patch from forcibly injecting 
+    # code into incorrect function blocks if the source structure differs.
+    ( cd "$KSU_DIR" && patch -p1 --fuzz=1 < 10_enable_susfs_for_ksu.patch ) \
+      || echo "::warning::10_enable_susfs_for_ksu.patch had rejects — check ${KSU_DIR}/*.rej"
+  fi
 fi
 
 echo "==> Applying kernel-side susfs patch ($SUSFS_KMAIN)"
