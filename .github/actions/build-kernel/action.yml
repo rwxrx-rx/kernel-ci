@@ -22,6 +22,16 @@ runs:
       run: |
         cd "$KERNEL_DIR"
 
+        # apply KernelSU fix if the file exists (safe for vanilla builds)
+        if [ -f "drivers/kernelsu/sulog/event.c" ]; then
+          sed -i 's/get_monotonic_boottime(&ts)/ktime_get_boottime_ts64(\&ts)/g' drivers/kernelsu/sulog/event.c
+        fi
+
+        # apply WireGuard fix if the file exists (safe for vanilla builds)
+        if [ -f "net/wireguard/compat/compat.h" ]; then
+          sed -i 's/struct timespec {/struct timespec_wg_dummy {/g' net/wireguard/compat/compat.h
+        fi
+
         MAKE_ARGS=(
           ARCH="$ARCH"
           O=out
