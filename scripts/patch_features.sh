@@ -11,6 +11,9 @@ source "$GITHUB_WORKSPACE/manifest/features.env"
 DEFCONFIG_PATH="$KERNEL_DIR/arch/${ARCH}/configs/${DEFCONFIG}"
 
 append_defconfig() {
+  # Cegah error jika parameter yang dikirim kosong
+  [ -z "${1:-}" ] && return 0
+  
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     key="${line%%=*}"
@@ -19,16 +22,17 @@ append_defconfig() {
   done <<< "$1"
 }
 
-if [ -f "$KERNEL_DIR/drivers/kernelsu/sulog/event.c" ]; then
-  sed -i 's/get_monotonic_boottime(&ts)/ktime_get_boottime_ts64(\&ts)/g' "$KERNEL_DIR/drivers/kernelsu/sulog/event.c"
-fi
+# 1. KSU event.c boottime patch (Cari otomatis dimana pun letaknya)
+for EVENT_C in $(find "$KERNEL_DIR" -type f -path "*/kernelsu*/event.c" 2>/dev/null); do
+  sed -i 's/get_monotonic_boottime(&ts)/ktime_get_boottime_ts64(\&ts)/g' "$EVENT_C"
+done
 
-# Safely inject fallback stubs if win_minmax.c exists anywhere in drivers/kernelsu
-WIN_MINMAX=$(find "$KERNEL_DIR/drivers/kernelsu" -name "win_minmax.c" 2>/dev/null | head -n 1 || true)
-if [ -n "${WIN_MINMAX:-}" ] && [ -f "$WIN_MINMAX" ]; then
-  if ! grep -q "ksu_input_hook" "$WIN_MINMAX"; then
-    echo "==> Injecting missing stubs into $WIN_MINMAX"
-    cat << 'EOF' >> "$WIN_MINMAX"
+# 2. Fix KSU Undefined Symbols (setenforce & ksu_input_hook)
+# Menyuntikkan stubs ke main.c dan win_minmax.c agar linker aman 100%
+for KSU_FILE in $(find "$KERNEL_DIR" -type f \( -name "main.c" -o -name "win_minmax.c" \) -path "*/kernelsu*" 2>/dev/null); do
+  if ! grep -q "ksu_input_hook" "$KSU_FILE"; then
+    echo "==> Injecting fallback stubs into $KSU_FILE"
+    cat << 'EOF' >> "$KSU_FILE"
 
 /* Fallback stubs for undefined KernelSU symbols */
 struct input_dev;
@@ -38,13 +42,15 @@ bool __attribute__((weak)) ksu_input_hook(struct input_dev *dev, unsigned int ty
 void __attribute__((weak)) setenforce(int enforcing) {}
 EOF
   fi
-fi
+done
 
+# 3. Check TCP BBR/Westwood
 if [ "${FEATURE_TCP_BBR:-false}" = "true" ] && [ "${FEATURE_TCP_WESTWOOD:-false}" = "true" ]; then
-  echo "::error::TCP BBR and Westwood can't both be the default congestion control — enable only one."
+  echo "::error::TCP BBR and Westwood can't both be the default congestion control."
   exit 1
 fi
 
+# 4. WireGuard
 if [ "${FEATURE_WIREGUARD:-false}" = "true" ]; then
   echo "==> Enabling WireGuard"
   
@@ -54,7 +60,11 @@ if [ "${FEATURE_WIREGUARD:-false}" = "true" ]; then
   sed -i '/wireguard/d' "$KERNEL_DIR/net/Kconfig" 2>/dev/null || true
   sed -i '/wireguard/d' "$KERNEL_DIR/net/Makefile" 2>/dev/null || true
 
-  git clone --depth=1 -b "$WIREGUARD_BRANCH" "$WIREGUARD_REPO" "$GITHUB_WORKSPACE/wireguard-src"
+  # Gunakan variabel aman jika repo/branch tidak terdefinisi
+  WG_REPO="${WIREGUARD_REPO:-https://github.com/WireGuard/wireguard-linux-compat.git}"
+  WG_BRANCH="${WIREGUARD_BRANCH:-master}"
+  
+  git clone --depth=1 -b "$WG_BRANCH" "$WG_REPO" "$GITHUB_WORKSPACE/wireguard-src"
   mkdir -p "$KERNEL_DIR/net/wireguard"
   cp -r "$GITHUB_WORKSPACE/wireguard-src/src/"* "$KERNEL_DIR/net/wireguard/"
   grep -q 'net/wireguard/Makefile' "$KERNEL_DIR/net/Makefile" 2>/dev/null \
@@ -88,69 +98,79 @@ with open(path, "w") as f: f.write(text)
       sed -i 's/struct timespec64 {/struct timespec64_wg_unused {/g' "$WG_COMPAT"
   fi
 
-  append_defconfig "$WIREGUARD_DEFCONFIG"
+  append_defconfig "${WIREGUARD_DEFCONFIG:-CONFIG_WIREGUARD=y}"
 fi
 
+# 5. Baseband Guard
 if [ "${FEATURE_BASEBAND_GUARD:-false}" = "true" ]; then
   echo "==> Integrating Baseband-guard (BBG)"
-  ( cd "$KERNEL_DIR" && curl -LSs "$BBG_SETUP_URL" | bash - ) \
-    || echo "::warning::Baseband-guard setup.sh reported an error"
+  if [ -n "${BBG_SETUP_URL:-}" ]; then
+    ( cd "$KERNEL_DIR" && curl -LSs "$BBG_SETUP_URL" | bash - ) \
+      || echo "::warning::Baseband-guard setup.sh reported an error"
+  fi
   
   BBG_TRACING="$KERNEL_DIR/security/baseband-guard/tracing/tracing.c"
   if [ -f "$BBG_TRACING" ]; then
       sed -i 's/selinux_cred(/bbg_selinux_cred(/g' "$BBG_TRACING"
   fi
 
-  append_defconfig "$BBG_DEFCONFIG"
+  append_defconfig "${BBG_DEFCONFIG:-}"
 fi
 
+# 6. ThinLTO
 if [ "${FEATURE_THINLTO_O3:-false}" = "true" ]; then
   echo "==> Enabling ThinLTO + -O3"
-  append_defconfig "$THINLTO_DEFCONFIG"
+  append_defconfig "${THINLTO_DEFCONFIG:-}"
   MAKEFILE="$KERNEL_DIR/Makefile"
   grep -q -- '-O2' "$MAKEFILE" && sed -i 's/-O2/-O3/g' "$MAKEFILE" || true
 fi
 
+# 7. ZRAM ZSTD
 if [ "${FEATURE_ZRAM_ZSTD:-false}" = "true" ]; then
   echo "==> Enabling ZRAM + zstd"
-  append_defconfig "$ZRAM_ZSTD_DEFCONFIG"
+  append_defconfig "${ZRAM_ZSTD_DEFCONFIG:-}"
 fi
 
+# 8. TCP BBR
 if [ "${FEATURE_TCP_BBR:-false}" = "true" ]; then
   echo "==> Enabling TCP BBR"
-  append_defconfig "$TCP_BBR_DEFCONFIG"
+  append_defconfig "${TCP_BBR_DEFCONFIG:-}"
 fi
 
+# 9. TCP Westwood
 if [ "${FEATURE_TCP_WESTWOOD:-false}" = "true" ]; then
   echo "==> Enabling TCP Westwood"
-  append_defconfig "$TCP_WESTWOOD_DEFCONFIG"
+  append_defconfig "${TCP_WESTWOOD_DEFCONFIG:-}"
 fi
 
+# 10. TTL Spoof
 if [ "${FEATURE_TTL_SPOOF:-false}" = "true" ]; then
   echo "==> Staging TTL/Hop-Limit spoof"
   mkdir -p "$GITHUB_WORKSPACE/out/extra"
   cat > "$GITHUB_WORKSPACE/out/extra/00_ttl_spoof.sh" <<EOF
 #!/system/bin/sh
-sysctl -w net.ipv4.ip_default_ttl=${TTL_SPOOF_DEFAULT_VALUE}
+sysctl -w net.ipv4.ip_default_ttl=${TTL_SPOOF_DEFAULT_VALUE:-64}
 for f in /proc/sys/net/ipv6/conf/*/hop_limit; do
-  echo ${TTL_SPOOF_DEFAULT_VALUE} > "\$f" 2>/dev/null || true
+  echo ${TTL_SPOOF_DEFAULT_VALUE:-64} > "\$f" 2>/dev/null || true
 done
 EOF
   chmod +x "$GITHUB_WORKSPACE/out/extra/00_ttl_spoof.sh"
 fi
 
+# 11. DroidSpace
 if [ "${FEATURE_DROIDSPACE:-false}" = "true" ]; then
   echo "==> Enabling DroidSpace prerequisites"
-  append_defconfig "$DROIDSPACE_DEFCONFIG"
+  append_defconfig "${DROIDSPACE_DEFCONFIG:-}"
 fi
 
+# 12. F2FS Opt
 if [ "${FEATURE_F2FS_OPT:-false}" = "true" ]; then
   echo "==> Enabling F2FS optimizations"
   F2FS_H="$KERNEL_DIR/fs/f2fs/f2fs.h"
   if [ -f "$F2FS_H" ] && ! grep -q "FI_COMPRESS_RELEASED" "$F2FS_H"; then
       sed -i '/FI_NO_EXTENT/a \	FI_COMPRESS_RELEASED,' "$F2FS_H"
   fi
-  append_defconfig "$F2FS_OPT_DEFCONFIG"
+  append_defconfig "${F2FS_OPT_DEFCONFIG:-}"
 fi
 
 echo "Feature injection step finished."
