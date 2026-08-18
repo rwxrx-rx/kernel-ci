@@ -2,6 +2,7 @@
 # scripts/patch_features.sh
 # Reads the FEATURE_* booleans from env (set by clone-patch/action.yml
 # from the workflow_dispatch toggles) and applies each enabled one.
+
 set -euo pipefail
 
 : "${KERNEL_DIR:?}"
@@ -39,6 +40,28 @@ if [ "${FEATURE_WIREGUARD:-false}" = "true" ]; then
     || echo 'obj-$(CONFIG_WIREGUARD) += wireguard/' >> "$KERNEL_DIR/net/Makefile"
   grep -q '"net/wireguard/Kconfig"' "$KERNEL_DIR/net/Kconfig" 2>/dev/null \
     || sed -i '/endmenu/i source "net/wireguard/Kconfig"' "$KERNEL_DIR/net/Kconfig"
+  
+  # --- [PATCH] Fix WireGuard timespec redefinition error ---
+  WG_COMPAT="$KERNEL_DIR/net/wireguard/compat/compat.h"
+  if [ -f "$WG_COMPAT" ]; then
+      echo "⚙️ Patching WireGuard timespec redefinition..."
+      python3 -c '
+path = "'"$WG_COMPAT"'"
+with open(path, "r") as f: text = f.read()
+target = "struct __kernel_timespec {"
+if target in text and "__kernel_timespec_defined" not in text:
+    idx = text.find(target)
+    brace = 0; end_idx = idx; started = False
+    for i in range(idx, len(text)):
+        if text[i] == "{": brace += 1; started = True
+        elif text[i] == "}": brace -= 1
+        if started and brace == 0: end_idx = i + 1; break
+    block = text[idx:end_idx]
+    text = text.replace(block, f"#ifndef __kernel_timespec_defined\n#define __kernel_timespec_defined\n{block}\n#endif")
+    with open(path, "w") as f: f.write(text)
+'
+  fi
+
   append_defconfig "$WIREGUARD_DEFCONFIG"
 fi
 
@@ -46,6 +69,28 @@ if [ "${FEATURE_BASEBAND_GUARD:-false}" = "true" ]; then
   echo "==> Integrating Baseband-guard (BBG)"
   ( cd "$KERNEL_DIR" && curl -LSs "$BBG_SETUP_URL" | bash - ) \
     || echo "::warning::Baseband-guard setup.sh reported an error — check its README for manual integration steps on this tree"
+  
+  # --- [PATCH] Fix Baseband Guard selinux_cred redefinition error ---
+  BBG_TRACING="$KERNEL_DIR/security/baseband-guard/tracing/tracing.c"
+  if [ -f "$BBG_TRACING" ]; then
+      echo "⚙️ Patching Baseband Guard selinux_cred redefinition..."
+      python3 -c '
+path = "'"$BBG_TRACING"'"
+with open(path, "r") as f: text = f.read()
+target = "static inline struct task_security_struct *selinux_cred(const struct cred *cred)"
+if target in text and "_SELINUX_OBJSEC_H_" not in text:
+    idx = text.find(target)
+    brace = 0; end_idx = idx; started = False
+    for i in range(idx, len(text)):
+        if text[i] == "{": brace += 1; started = True
+        elif text[i] == "}": brace -= 1
+        if started and brace == 0: end_idx = i + 1; break
+    block = text[idx:end_idx]
+    text = text.replace(block, f"#ifndef _SELINUX_OBJSEC_H_\n{block}\n#endif")
+    with open(path, "w") as f: f.write(text)
+'
+  fi
+
   append_defconfig "$BBG_DEFCONFIG"
 fi
 
@@ -96,6 +141,14 @@ fi
 
 if [ "${FEATURE_F2FS_OPT:-false}" = "true" ]; then
   echo "==> Enabling F2FS optimizations (compression, xattr/ACL)"
+  
+  # --- [PATCH] Fix F2FS missing FI_COMPRESS_RELEASED flag ---
+  F2FS_H="$KERNEL_DIR/fs/f2fs/f2fs.h"
+  if [ -f "$F2FS_H" ] && ! grep -q "FI_COMPRESS_RELEASED" "$F2FS_H"; then
+      echo "⚙️ Patching FI_COMPRESS_RELEASED in F2FS..."
+      sed -i '/FI_NO_EXTENT/a \	FI_COMPRESS_RELEASED,' "$F2FS_H"
+  fi
+
   append_defconfig "$F2FS_OPT_DEFCONFIG"
 fi
 
