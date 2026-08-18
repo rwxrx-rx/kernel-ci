@@ -19,6 +19,10 @@ append_defconfig() {
   done <<< "$1"
 }
 
+if [ -f "$KERNEL_DIR/drivers/kernelsu/sulog/event.c" ]; then
+  sed -i 's/get_monotonic_boottime(&ts)/ktime_get_boottime_ts64(\&ts)/g' "$KERNEL_DIR/drivers/kernelsu/sulog/event.c"
+fi
+
 if [ "${FEATURE_TCP_BBR:-false}" = "true" ] && [ "${FEATURE_TCP_WESTWOOD:-false}" = "true" ]; then
   echo "::error::TCP BBR and Westwood can't both be the default congestion control — enable only one."
   exit 1
@@ -56,6 +60,8 @@ text = text.replace("old_synchronize_rcu()", "wg_old_synchronize_rcu()")
 
 with open(path, "w") as f: f.write(text)
 '
+      sed -i 's/struct timespec {/struct timespec_wg_unused {/g' "$WG_COMPAT"
+      sed -i 's/struct timespec64 {/struct timespec64_wg_unused {/g' "$WG_COMPAT"
   fi
 
   append_defconfig "$WIREGUARD_DEFCONFIG"
