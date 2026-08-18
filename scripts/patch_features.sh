@@ -30,6 +30,15 @@ fi
 
 if [ "${FEATURE_WIREGUARD:-false}" = "true" ]; then
   echo "==> Enabling WireGuard"
+  
+  # Hapus WireGuard bawaan kernel agar tidak terjadi duplicate symbol
+  rm -rf "$KERNEL_DIR/drivers/net/wireguard" "$KERNEL_DIR/net/wireguard"
+  sed -i '/wireguard/d' "$KERNEL_DIR/drivers/net/Kconfig" 2>/dev/null || true
+  sed -i '/wireguard/d' "$KERNEL_DIR/drivers/net/Makefile" 2>/dev/null || true
+  sed -i '/wireguard/d' "$KERNEL_DIR/net/Kconfig" 2>/dev/null || true
+  sed -i '/wireguard/d' "$KERNEL_DIR/net/Makefile" 2>/dev/null || true
+
+  # Clone dan pasang WireGuard baru
   git clone --depth=1 -b "$WIREGUARD_BRANCH" "$WIREGUARD_REPO" "$GITHUB_WORKSPACE/wireguard-src"
   mkdir -p "$KERNEL_DIR/net/wireguard"
   cp -r "$GITHUB_WORKSPACE/wireguard-src/src/"* "$KERNEL_DIR/net/wireguard/"
