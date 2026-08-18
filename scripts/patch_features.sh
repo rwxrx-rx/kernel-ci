@@ -41,7 +41,7 @@ path = "'"$WG_COMPAT"'"
 with open(path, "r") as f: text = f.read()
 
 target = "struct __kernel_timespec {"
-if target in text and "__kernel_timespec_defined" not in text:
+if target in text and "#ifndef __kernel_timespec" not in text:
     idx = text.find(target)
     brace = 0; end_idx = idx; started = False
     for i in range(idx, len(text)):
@@ -49,7 +49,7 @@ if target in text and "__kernel_timespec_defined" not in text:
         elif text[i] == "}": brace -= 1
         if started and brace == 0: end_idx = i + 1; break
     block = text[idx:end_idx]
-    text = text.replace(block, f"#ifndef __kernel_timespec_defined\n#define __kernel_timespec_defined\n{block}\n#endif")
+    text = text.replace(block, f"#ifndef __kernel_timespec\n{block}\n#endif")
 
 text = text.replace("static __always_inline void old_synchronize_rcu(void)", "static __always_inline void wg_old_synchronize_rcu(void)")
 text = text.replace("old_synchronize_rcu()", "wg_old_synchronize_rcu()")
@@ -68,7 +68,6 @@ if [ "${FEATURE_BASEBAND_GUARD:-false}" = "true" ]; then
   
   BBG_TRACING="$KERNEL_DIR/security/baseband-guard/tracing/tracing.c"
   if [ -f "$BBG_TRACING" ]; then
-      # Ganti nama fungsi agar tidak bentrok dengan selinux bawaan kernel
       sed -i 's/selinux_cred(/bbg_selinux_cred(/g' "$BBG_TRACING"
   fi
 
