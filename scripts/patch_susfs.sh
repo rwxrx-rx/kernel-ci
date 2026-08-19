@@ -6,27 +6,32 @@
 # then loose fs/ + include/linux/ files copied in directly.
 set -euo pipefail
 
-# Check if KSU variant is vanilla/none. If so, skip SUSFS entirely.
-# This prevents the script from failing on matrix builds that don't export KSU_DIR.
 if [ "${KSU_VARIANT:-}" = "none" ]; then
   echo "KSU_VARIANT is 'none'. Skipping SUSFS integration for vanilla kernel."
   exit 0
 fi
 
 : "${KERNEL_DIR:?KERNEL_DIR not set}"
-: "${KSU_DIR:?KSU_DIR not set (patch_ksu.sh must run first)}"
 : "${SUSFS_REPO:?}"
 : "${SUSFS_BRANCH:?}"
 : "${SUSFS_TAG:?}"
+
+if [ -z "${KSU_DIR:-}" ]; then
+    if [ -d "$KERNEL_DIR/KernelSU-Next" ]; then
+        KSU_DIR="KernelSU-Next"
+    elif [ -d "$KERNEL_DIR/KernelSU" ]; then
+        KSU_DIR="KernelSU"
+    else
+        echo "::error::KSU_DIR not set and could not be detected automatically."
+        exit 1
+    fi
+fi
 
 WORK="$GITHUB_WORKSPACE/susfs4ksu"
 rm -rf "$WORK"
 git clone --depth=1 -b "$SUSFS_BRANCH" "$SUSFS_REPO" "$WORK" \
   || { echo "::error::could not clone $SUSFS_REPO @ $SUSFS_BRANCH"; exit 1; }
 
-# Best-effort pin to the requested tag if it exists on this branch;
-# the branch HEAD is used otherwise (some forks tag less strictly than
-# upstream simonpunk/susfs4ksu).
 ( cd "$WORK" && git fetch --depth=1 origin "refs/tags/${SUSFS_TAG}" 2>/dev/null \
     && git checkout FETCH_HEAD ) || \
   echo "Tag ${SUSFS_TAG} not found on ${SUSFS_BRANCH}; using branch HEAD instead."
@@ -41,7 +46,6 @@ SUSFS_KMAIN="50_add_susfs_in_kernel-${KERNEL_VERSION_MAJOR}.${KERNEL_VERSION_MIN
 if [ -f "$WORK/kernel_patches/$SUSFS_KMAIN" ]; then
   cp "$WORK/kernel_patches/$SUSFS_KMAIN" .
 else
-  # Some 4.14 mirrors ship it unversioned
   cp "$WORK"/kernel_patches/50_add_susfs_in_kernel*.patch . 2>/dev/null || true
   SUSFS_KMAIN=$(basename "$(ls 50_add_susfs_in_kernel*.patch | head -n1)")
 fi
@@ -51,15 +55,10 @@ cp "$WORK"/kernel_patches/fs/* fs/ 2>/dev/null || true
 cp "$WORK"/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
 
 echo "==> Applying KernelSU-side susfs patch"
-# Check if the selected KSU variant already has SUSFS integrated natively.
-# Applying the patch on top of these variants will corrupt selinux.c syntax
-# and cause "function definition is not allowed here" compilation errors.
 if [[ "${KSU_VARIANT:-}" == "resukisu" || "${KSU_VARIANT:-}" == "sukisu-ultra" || "${KSU_VARIANT:-}" == "xxksu" ]]; then
   echo "  Skipping 10_enable_susfs_for_ksu.patch since KSU_VARIANT '${KSU_VARIANT}' usually has SUSFS built-in."
 else
   if [ -f "$KSU_DIR/10_enable_susfs_for_ksu.patch" ]; then
-    # Reduced --fuzz from 3 to 1 to prevent patch from forcibly injecting 
-    # code into incorrect function blocks if the source structure differs.
     ( cd "$KSU_DIR" && patch -p1 --fuzz=1 < 10_enable_susfs_for_ksu.patch ) \
       || echo "::warning::10_enable_susfs_for_ksu.patch had rejects — check ${KSU_DIR}/*.rej"
   fi
@@ -69,7 +68,6 @@ echo "==> Applying kernel-side susfs patch ($SUSFS_KMAIN)"
 patch -p1 --fuzz=3 < "$SUSFS_KMAIN" \
   || echo "::warning::$SUSFS_KMAIN had rejects — check *.rej files, this is normal on heavily-modified vendor trees and usually needs a manual pass"
 
-# Recommended susfs defconfig flags (non-GKI, manual hook)
 DEFCONFIG_PATH="arch/${ARCH}/configs/${DEFCONFIG}"
 for flag in \
   CONFIG_KSU_SUSFS=y \
