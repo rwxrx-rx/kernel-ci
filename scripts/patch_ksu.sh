@@ -1,92 +1,76 @@
 #!/usr/bin/env bash
+# scripts/patch_ksu.sh
 set -euo pipefail
 
-: "${KERNEL_DIR:?}"
+: "${KERNEL_DIR:?KERNEL_DIR not set}"
+: "${KSU_VARIANT:?KSU_VARIANT not set}"
+: "${ARCH:?ARCH not set}"
+: "${DEFCONFIG:?DEFCONFIG not set}"
 
-echo "==> [Manual Hook] Starting code injection into core kernel..."
+cd "$KERNEL_DIR"
 
-# Helper function for safe injection (Idempotent)
-inject_hook() {
-    local file="$1"
-    local func_sig="$2"
-    local extern_decl="$3"
-    local hook_call="$4"
-
-    if [ ! -f "$file" ]; then
-        echo "[-] $file not found, skipping..."
-        return
-    fi
-
-    if grep -q "CONFIG_KSU" "$file"; then
-        echo "[~] $file is already injected with KSU, skipping..."
-        return
-    fi
-
-    echo "[+] Injecting hook into $file..."
-
-    # 1. Inject extern declaration at the top of the file (after #include lines)
-    sed -i "/#include <linux\/fs.h>/a \\
-/* KernelSU Manual Hook */\\
-#ifdef CONFIG_KSU\\
-$extern_decl\\
-#endif\\
-" "$file"
-
-    # 2. Inject call site right below the target function declaration
-    # Using awk to find the function signature and the first curly brace '{'
-    awk -v sig="$func_sig" -v hook="\\n#ifdef CONFIG_KSU\\n$hook_call\\n#endif\\n" '
-    BEGIN { inj=0; brace=0; }
-    $0 ~ sig { inj=1; }
-    inj==1 && /{/ {
-        print $0;
-        print hook;
-        inj=2;
-        next;
-    }
-    { print $0; }
-    ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+run_setup() {
+  local url="$1" ref="$2"
+  if [ -n "$ref" ]; then
+    curl -LSs "$url" | bash -s "$ref"
+  else
+    curl -LSs "$url" | bash -
+  fi
 }
 
-# --- 1. fs/exec.c (do_execveat_common / do_execve) ---
-inject_hook \
-    "$KERNEL_DIR/fs/exec.c" \
-    "static int do_execveat_common" \
-    "extern bool ksu_execveat_hook __read_mostly;\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *ptr, int *flags);\nextern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *ptr, int *flags);" \
-    "    if (unlikely(ksu_execveat_hook)) {\n        ksu_handle_execveat(&fd, &filename, &argv, &flags);\n    } else {\n        ksu_handle_execveat_sucompat(&fd, &filename, &argv, &flags);\n    }"
+case "$KSU_VARIANT" in
+  none)
+    echo "KSU_VARIANT=none — building a vanilla kernel, nothing to patch."
+    exit 0
+    ;;
+  kernelsu-next-legacy)
+    echo "==> Integrating KernelSU-Next (legacy / manual hook mode)"
+    run_setup "$KSUN_SETUP_URL" "$KSUN_REF"
+    KSU_DIR="KernelSU-Next"
+    ;;
+  resukisu)
+    echo "==> Integrating ReSukiSU"
+    run_setup "$RESUKISU_SETUP_URL" "$RESUKISU_REF"
+    KSU_DIR="KernelSU"
+    ;;
+  xxksu)
+    echo "==> Integrating xxKSU"
+    if [[ "$XXKSU_SETUP_URL" == *CHANGE-ME* ]]; then
+      echo "::error::manifest/ksu-variants.env still has the xxKSU placeholder URL. Fill in XXKSU_SETUP_URL/XXKSU_REF before selecting this variant."
+      exit 1
+    fi
+    run_setup "$XXKSU_SETUP_URL" "$XXKSU_REF"
+    KSU_DIR="KernelSU"
+    ;;
+  sukisu-ultra)
+    echo "==> Integrating SukiSU Ultra ($SUKISU_REF branch)"
+    run_setup "$SUKISU_SETUP_URL" "$SUKISU_REF"
+    KSU_DIR="KernelSU"
+    ;;
+  wildksu)
+    echo "==> Integrating Wild KSU (WildKernels)"
+    run_setup "$WILDKSU_SETUP_URL" "$WILDKSU_REF"
+    KSU_DIR="KernelSU"
+    ;;
+  *)
+    echo "::error::Unknown KSU_VARIANT '$KSU_VARIANT'. Valid: none, kernelsu-next-legacy, resukisu, xxksu, sukisu-ultra, wildksu"
+    exit 1
+    ;;
+esac
 
-# --- 2. fs/open.c (faccessat) ---
-inject_hook \
-    "$KERNEL_DIR/fs/open.c" \
-    "SYSCALL_DEFINE3(faccessat" \
-    "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);" \
-    "    ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"
+echo "KSU_DIR=$KSU_DIR" >> "$GITHUB_ENV"
 
-# --- 3. fs/read_write.c (vfs_read) ---
-inject_hook \
-    "$KERNEL_DIR/fs/read_write.c" \
-    "ssize_t vfs_read(struct file " \
-    "extern bool ksu_vfs_read_hook __read_mostly;\nextern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);" \
-    "    if (unlikely(ksu_vfs_read_hook)) {\n        ksu_handle_vfs_read(&file, &buf, &count, &pos);\n    }"
+DEFCONFIG_PATH="arch/${ARCH}/configs/${DEFCONFIG}"
 
-# --- 4. fs/stat.c (vfs_statx) ---
-inject_hook \
-    "$KERNEL_DIR/fs/stat.c" \
-    "int vfs_statx(int dfd" \
-    "extern bool ksu_vfs_statx_hook __read_mostly;\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);" \
-    "    if (unlikely(ksu_vfs_statx_hook)) {\n        ksu_handle_stat(&dfd, &filename, &flags);\n    }"
+echo "==> Configuring defconfig for Manual Hook Mode..."
+if ! grep -q '^CONFIG_KSU=y' "$DEFCONFIG_PATH" 2>/dev/null; then
+  echo "CONFIG_KSU=y" >> "$DEFCONFIG_PATH"
+fi
 
-# --- 5. kernel/reboot.c (sys_reboot) ---
-inject_hook \
-    "$KERNEL_DIR/kernel/reboot.c" \
-    "SYSCALL_DEFINE4(reboot" \
-    "extern int ksu_handle_reboot(int *magic1, int *magic2, unsigned int *cmd, void __user **arg);" \
-    "    ksu_handle_reboot(&magic1, &magic2, &cmd, &arg);"
+sed -i '/^CONFIG_KSU_KPROBE_HOOKS=/d' "$DEFCONFIG_PATH" 2>/dev/null || true
+echo "CONFIG_KSU_KPROBE_HOOKS=n" >> "$DEFCONFIG_PATH"
 
-# --- 6. (Bonus KSU-Next) drivers/input/input.c (Volume Keys) ---
-inject_hook \
-    "$KERNEL_DIR/drivers/input/input.c" \
-    "static void input_handle_event" \
-    "extern bool ksu_input_hook __read_mostly;\nextern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);" \
-    "    if (unlikely(ksu_input_hook)) {\n        ksu_handle_input_handle_event(&type, &code, &value);\n    }"
+sed -i '/^CONFIG_KSU_WITH_KPROBES=/d' "$DEFCONFIG_PATH" 2>/dev/null || true
+echo "CONFIG_KSU_WITH_KPROBES=n" >> "$DEFCONFIG_PATH"
 
-echo "==> [Manual Hook] Integration complete."
+echo "==> KSU patch script finished."
