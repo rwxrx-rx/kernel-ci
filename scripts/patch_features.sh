@@ -23,7 +23,18 @@ append_defconfig() {
 }
 
 # 1. Fix KSU boottime (timespec mismatch on kernel 4.14)
-for EVENT_C in $(find "$KERNEL_DIR" -type f -path "*/kernelsu*/event.c" 2>/dev/null); do
+#
+# BUG FIXED: KernelSU forks integrate into a non-GKI tree via a SYMLINK
+# (e.g. drivers/kernelsu -> ../KernelSU-Next/kernel — confirmed by
+# setup.sh's own "[+] Symlink created." log line). GNU find does NOT
+# descend into a directory reached through a symlink unless you pass
+# -L. Without it, this whole loop silently matched zero files — sed
+# never touched the real event.c, the build kept the original
+# `struct timespec64` + `ktime_get_boottime_ts64`, and the mismatch
+# only surfaced later at compile time with no hint that this patch step
+# had done nothing. `-L` makes find follow the symlink so it actually
+# reaches drivers/kernelsu/sulog/event.c.
+for EVENT_C in $(find -L "$KERNEL_DIR" -type f -path "*/kernelsu*/event.c" 2>/dev/null); do
   echo "==> Fixing boottime struct in $EVENT_C"
   
   # Target the data type only so that it doesn't miss due to spaces/formatting
@@ -33,7 +44,8 @@ for EVENT_C in $(find "$KERNEL_DIR" -type f -path "*/kernelsu*/event.c" 2>/dev/n
 done
 
 # 2. Fix KSU undefined symbols (setenforce & ksu_input_hook)
-for KSU_FILE in $(find "$KERNEL_DIR" -type f \( -name "main.c" -o -name "win_minmax.c" \) -path "*/kernelsu*" 2>/dev/null); do
+# Same -L fix applies here — this loop had the identical symlink bug.
+for KSU_FILE in $(find -L "$KERNEL_DIR" -type f \( -name "main.c" -o -name "win_minmax.c" \) -path "*/kernelsu*" 2>/dev/null); do
   if ! grep -q "ksu_input_hook" "$KSU_FILE"; then
     echo "==> Injecting fallback stubs into $KSU_FILE"
     cat << 'EOF' >> "$KSU_FILE"
