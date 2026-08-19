@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# scripts/patch_ksu.sh
 set -euo pipefail
 
 : "${KERNEL_DIR:?KERNEL_DIR not set}"
@@ -62,7 +61,6 @@ echo "KSU_DIR=$KSU_DIR" >> "$GITHUB_ENV"
 
 DEFCONFIG_PATH="arch/${ARCH}/configs/${DEFCONFIG}"
 
-echo "==> Configuring defconfig for Manual Hook Mode..."
 if ! grep -q '^CONFIG_KSU=y' "$DEFCONFIG_PATH" 2>/dev/null; then
   echo "CONFIG_KSU=y" >> "$DEFCONFIG_PATH"
 fi
@@ -72,5 +70,14 @@ echo "CONFIG_KSU_KPROBE_HOOKS=n" >> "$DEFCONFIG_PATH"
 
 sed -i '/^CONFIG_KSU_WITH_KPROBES=/d' "$DEFCONFIG_PATH" 2>/dev/null || true
 echo "CONFIG_KSU_WITH_KPROBES=n" >> "$DEFCONFIG_PATH"
+
+if [ -d "$KSU_DIR" ]; then
+  if [ -f "drivers/Kconfig" ] && ! grep -q "$KSU_DIR" "drivers/Kconfig" 2>/dev/null; then
+    sed -i "/endmenu/i source \"drivers/$KSU_DIR/Kconfig\"" "drivers/Kconfig" 2>/dev/null || true
+  fi
+  if [ -f "drivers/Makefile" ] && ! grep -q "$KSU_DIR" "drivers/Makefile" 2>/dev/null; then
+    echo "obj-y += $KSU_DIR/" >> "drivers/Makefile"
+  fi
+fi
 
 echo "==> KSU patch script finished."
