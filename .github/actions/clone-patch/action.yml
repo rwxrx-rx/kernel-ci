@@ -81,6 +81,11 @@ runs:
         KSU_VARIANT: ${{ inputs.ksu_variant }}
       run: bash "$GITHUB_WORKSPACE/scripts/patch_ksu.sh"
 
+    - name: Apply KSU Manual Hooks
+      if: inputs.ksu_variant != 'none'
+      shell: bash
+      run: bash "$GITHUB_WORKSPACE/scripts/patch_manual_hook.sh"
+
     - name: Patch susfs4ksu
       if: inputs.susfs == 'true' && inputs.ksu_variant != 'none'
       shell: bash
