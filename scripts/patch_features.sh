@@ -44,19 +44,39 @@ for EVENT_C in $(find -L "$KERNEL_DIR" -type f -path "*/kernelsu*/event.c" 2>/de
 done
 
 # 2. Fix KSU undefined symbols (setenforce & ksu_input_hook)
-# Same -L fix applies here — this loop had the identical symlink bug.
-for KSU_FILE in $(find -L "$KERNEL_DIR" -type f \( -name "main.c" -o -name "win_minmax.c" \) -path "*/kernelsu*" 2>/dev/null); do
-  if ! grep -q "ksu_input_hook" "$KSU_FILE"; then
-    echo "==> Injecting fallback stubs into $KSU_FILE"
-    cat << 'EOF' >> "$KSU_FILE"
-
-/* Fallback stubs for undefined KernelSU symbols */
+#
+# BUG FIXED: the previous version appended the stub into main.c/
+# win_minmax.c only `if ! grep -q "ksu_input_hook" "$KSU_FILE"` — but
+# that check matches ANY mention of the name, including a bare
+# `extern ksu_input_hook(...)` forward declaration at the call site.
+# Since the call site obviously already mentions the symbol, the check
+# said "already there" and skipped injecting the actual DEFINITION —
+# so it stayed undefined at link time no matter what. (The "win_minmax.c"
+# filename in the linker error is very likely a ThinLTO attribution
+# artifact if FEATURE_THINLTO_O3 is on — win_minmax.c is a stock
+# kernel/net file unrelated to KernelSU; don't read too much into it.)
+#
+# Fixed by writing ONE dedicated stub file and wiring it into the KSU
+# driver's own Makefile via `obj-y +=`, instead of guessing which
+# existing file is safe to append into. Idempotent on file existence,
+# not on a fragile substring match.
+for KSU_MAKEFILE in $(find -L "$KERNEL_DIR" -maxdepth 6 -type f -name "Makefile" -path "*/kernelsu*" 2>/dev/null); do
+  KSU_SRC_DIR="$(dirname "$KSU_MAKEFILE")"
+  STUB_FILE="$KSU_SRC_DIR/ksu_compat_stubs.c"
+  if [ ! -f "$STUB_FILE" ]; then
+    echo "==> Adding KSU compat stub file: $STUB_FILE"
+    cat > "$STUB_FILE" << 'EOF'
+/* Compat stubs for symbols this non-GKI 4.14 tree doesn't provide. */
 struct input_dev;
 bool __attribute__((weak)) ksu_input_hook(struct input_dev *dev, unsigned int type, unsigned int code, int value) {
     return false;
 }
 void __attribute__((weak)) setenforce(int enforcing) {}
 EOF
+    grep -q 'ksu_compat_stubs' "$KSU_MAKEFILE" 2>/dev/null \
+      || echo 'obj-y += ksu_compat_stubs.o' >> "$KSU_MAKEFILE"
+  else
+    echo "Compat stub already present at $STUB_FILE, skipping."
   fi
 done
 
