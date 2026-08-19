@@ -33,10 +33,10 @@ $extern_decl\\
 " "$file"
 
     # 2. Inject call site right below the target function declaration
-    # Using awk to find the function signature and the first curly brace '{'
+    # FIXED: using index($0, sig) instead of regex matching ($0 ~ sig) to prevent Unmatched '(' errors
     awk -v sig="$func_sig" -v hook="\\n#ifdef CONFIG_KSU\\n$hook_call\\n#endif\\n" '
     BEGIN { inj=0; brace=0; }
-    $0 ~ sig { inj=1; }
+    index($0, sig) > 0 { inj=1; }
     inj==1 && /{/ {
         print $0;
         print hook;
