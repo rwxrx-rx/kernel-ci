@@ -23,23 +23,10 @@ append_defconfig() {
 }
 
 # 1. Fix KSU boottime (timespec mismatch on kernel 4.14)
-#
-# BUG FIXED: KernelSU forks integrate into a non-GKI tree via a SYMLINK
-# (e.g. drivers/kernelsu -> ../KernelSU-Next/kernel — confirmed by
-# setup.sh's own "[+] Symlink created." log line). GNU find does NOT
-# descend into a directory reached through a symlink unless you pass
-# -L. Without it, this whole loop silently matched zero files — sed
-# never touched the real event.c, the build kept the original
-# `struct timespec64` + `ktime_get_boottime_ts64`, and the mismatch
-# only surfaced later at compile time with no hint that this patch step
-# had done nothing. `-L` makes find follow the symlink so it actually
-# reaches drivers/kernelsu/sulog/event.c.
+# (Aman untuk vanilla: find -L tidak akan menemukan apapun jika tidak ada KSU, loop dilewati otomatis)
 for EVENT_C in $(find -L "$KERNEL_DIR" -type f -path "*/kernelsu*/event.c" 2>/dev/null); do
   echo "==> Fixing boottime struct in $EVENT_C"
-  
-  # Target the data type only so that it doesn't miss due to spaces/formatting
   sed -i 's/struct timespec64/struct timespec/g' "$EVENT_C"
-  # Replace the function
   sed -i 's/ktime_get_boottime_ts64/get_monotonic_boottime/g' "$EVENT_C"
 done
 
