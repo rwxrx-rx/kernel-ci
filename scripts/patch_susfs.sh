@@ -12,14 +12,17 @@ fi
 : "${SUSFS_TAG:?}"
 
 if [ -z "${KSU_DIR:-}" ]; then
-    KSU_PATH=$(find "$KERNEL_DIR" -type d \( -name "KernelSU-Next" -o -name "KernelSU" -o -name "kernelsu" \) | head -n 1)
-    if [ -n "$KSU_PATH" ]; then
-        KSU_DIR=$(realpath --relative-to="$KERNEL_DIR" "$KSU_PATH")
+    KSU_PATH=$(ls -d "$KERNEL_DIR"/* 2>/dev/null | grep -iE 'kernelsu|ksu' | head -n 1 || true)
+    if [ -n "$KSU_PATH" ] && [ -d "$KSU_PATH" ]; then
+        KSU_DIR=$(basename "$KSU_PATH")
     else
-        echo "::error::KSU directory could not be detected automatically inside $KERNEL_DIR."
+        echo "::error::KSU directory could not be detected. Contents of $KERNEL_DIR:"
+        ls -la "$KERNEL_DIR" || true
         exit 1
     fi
 fi
+
+echo "Using KSU_DIR=$KSU_DIR"
 
 WORK="$GITHUB_WORKSPACE/susfs4ksu"
 rm -rf "$WORK"
