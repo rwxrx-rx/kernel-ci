@@ -43,50 +43,13 @@ for EVENT_C in $(find -L "$KERNEL_DIR" -type f -path "*/kernelsu*/event.c" 2>/de
   sed -i 's/ktime_get_boottime_ts64/get_monotonic_boottime/g' "$EVENT_C"
 done
 
-# 2. Fix KSU undefined symbols (setenforce & ksu_input_hook)
-#
-# BUG FIXED: the previous version appended the stub into main.c/
-# win_minmax.c only `if ! grep -q "ksu_input_hook" "$KSU_FILE"` — but
-# that check matches ANY mention of the name, including a bare
-# `extern ksu_input_hook(...)` forward declaration at the call site.
-# Since the call site obviously already mentions the symbol, the check
-# said "already there" and skipped injecting the actual DEFINITION —
-# so it stayed undefined at link time no matter what. (The "win_minmax.c"
-# filename in the linker error is very likely a ThinLTO attribution
-# artifact if FEATURE_THINLTO_O3 is on — win_minmax.c is a stock
-# kernel/net file unrelated to KernelSU; don't read too much into it.)
-#
-# Fixed by writing ONE dedicated stub file and wiring it into the KSU
-# driver's own Makefile via `obj-y +=`, instead of guessing which
-# existing file is safe to append into. Idempotent on file existence,
-# not on a fragile substring match.
-for KSU_MAKEFILE in $(find -L "$KERNEL_DIR" -maxdepth 6 -type f -name "Makefile" -path "*/kernelsu*" 2>/dev/null); do
-  KSU_SRC_DIR="$(dirname "$KSU_MAKEFILE")"
-  STUB_FILE="$KSU_SRC_DIR/ksu_compat_stubs.c"
-  if [ ! -f "$STUB_FILE" ]; then
-    echo "==> Adding KSU compat stub file: $STUB_FILE"
-    cat > "$STUB_FILE" << 'EOF'
-/* Compat stubs for symbols this non-GKI 4.14 tree doesn't provide. */
-struct input_dev;
-bool __attribute__((weak)) ksu_input_hook(struct input_dev *dev, unsigned int type, unsigned int code, int value) {
-    return false;
-}
-void __attribute__((weak)) setenforce(int enforcing) {}
-EOF
-    grep -q 'ksu_compat_stubs' "$KSU_MAKEFILE" 2>/dev/null \
-      || echo 'obj-y += ksu_compat_stubs.o' >> "$KSU_MAKEFILE"
-  else
-    echo "Compat stub already present at $STUB_FILE, skipping."
-  fi
-done
-
-# 3. Check TCP BBR/Westwood
+# 2. Check TCP BBR/Westwood
 if [ "${FEATURE_TCP_BBR:-false}" = "true" ] && [ "${FEATURE_TCP_WESTWOOD:-false}" = "true" ]; then
   echo "::error::TCP BBR and Westwood can't both be the default congestion control."
   exit 1
 fi
 
-# 4. WireGuard
+# 3. WireGuard
 if [ "${FEATURE_WIREGUARD:-false}" = "true" ]; then
   echo "==> Enabling WireGuard"
   
@@ -136,7 +99,7 @@ with open(path, "w") as f: f.write(text)
   append_defconfig "${WIREGUARD_DEFCONFIG:-CONFIG_WIREGUARD=y}"
 fi
 
-# 5. Baseband Guard
+# 4. Baseband Guard
 if [ "${FEATURE_BASEBAND_GUARD:-false}" = "true" ]; then
   echo "==> Integrating Baseband-guard (BBG)"
   if [ -n "${BBG_SETUP_URL:-}" ]; then
@@ -152,7 +115,7 @@ if [ "${FEATURE_BASEBAND_GUARD:-false}" = "true" ]; then
   append_defconfig "${BBG_DEFCONFIG:-}"
 fi
 
-# 6. ThinLTO
+# 5. ThinLTO
 if [ "${FEATURE_THINLTO_O3:-false}" = "true" ]; then
   echo "==> Enabling ThinLTO + -O3"
   append_defconfig "${THINLTO_DEFCONFIG:-}"
@@ -160,25 +123,25 @@ if [ "${FEATURE_THINLTO_O3:-false}" = "true" ]; then
   grep -q -- '-O2' "$MAKEFILE" && sed -i 's/-O2/-O3/g' "$MAKEFILE" || true
 fi
 
-# 7. ZRAM ZSTD
+# 6. ZRAM ZSTD
 if [ "${FEATURE_ZRAM_ZSTD:-false}" = "true" ]; then
   echo "==> Enabling ZRAM + zstd"
   append_defconfig "${ZRAM_ZSTD_DEFCONFIG:-}"
 fi
 
-# 8. TCP BBR
+# 7. TCP BBR
 if [ "${FEATURE_TCP_BBR:-false}" = "true" ]; then
   echo "==> Enabling TCP BBR"
   append_defconfig "${TCP_BBR_DEFCONFIG:-}"
 fi
 
-# 9. TCP Westwood
+# 8. TCP Westwood
 if [ "${FEATURE_TCP_WESTWOOD:-false}" = "true" ]; then
   echo "==> Enabling TCP Westwood"
   append_defconfig "${TCP_WESTWOOD_DEFCONFIG:-}"
 fi
 
-# 10. TTL Spoof
+# 9. TTL Spoof
 if [ "${FEATURE_TTL_SPOOF:-false}" = "true" ]; then
   echo "==> Staging TTL/Hop-Limit spoof"
   mkdir -p "$GITHUB_WORKSPACE/out/extra"
@@ -192,13 +155,13 @@ EOF
   chmod +x "$GITHUB_WORKSPACE/out/extra/00_ttl_spoof.sh"
 fi
 
-# 11. DroidSpace
+# 10. DroidSpace
 if [ "${FEATURE_DROIDSPACE:-false}" = "true" ]; then
   echo "==> Enabling DroidSpace prerequisites"
   append_defconfig "${DROIDSPACE_DEFCONFIG:-}"
 fi
 
-# 12. F2FS Opt
+# 11. F2FS Opt
 if [ "${FEATURE_F2FS_OPT:-false}" = "true" ]; then
   echo "==> Enabling F2FS optimizations"
   F2FS_H="$KERNEL_DIR/fs/f2fs/f2fs.h"
