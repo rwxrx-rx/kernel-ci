@@ -33,7 +33,7 @@ $extern_decl\\
 " "$file"
 
     # 2. Inject call site right below the target function declaration
-    # FIXED: using index($0, sig) instead of regex matching ($0 ~ sig) to prevent Unmatched '(' errors
+    # FIXED: using index($0, sig) instead of regex matching ($0 ~ sig)
     awk -v sig="$func_sig" -v hook="\\n#ifdef CONFIG_KSU\\n$hook_call\\n#endif\\n" '
     BEGIN { inj=0; brace=0; }
     index($0, sig) > 0 { inj=1; }
