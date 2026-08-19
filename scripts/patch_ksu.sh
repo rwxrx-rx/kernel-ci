@@ -72,11 +72,11 @@ sed -i '/^CONFIG_KSU_WITH_KPROBES=/d' "$DEFCONFIG_PATH" 2>/dev/null || true
 echo "CONFIG_KSU_WITH_KPROBES=n" >> "$DEFCONFIG_PATH"
 
 if [ -d "$KSU_DIR" ]; then
-  if [ -f "drivers/Kconfig" ] && ! grep -q "$KSU_DIR" "drivers/Kconfig" 2>/dev/null; then
-    sed -i "/endmenu/i source \"drivers/$KSU_DIR/Kconfig\"" "drivers/Kconfig" 2>/dev/null || true
+  if [ -f "Kconfig" ] && ! grep -q "$KSU_DIR" "Kconfig" 2>/dev/null; then
+    sed -i "/endmenu/i source \"$KSU_DIR/Kconfig\"" "Kconfig" 2>/dev/null || true
   fi
-  if [ -f "drivers/Makefile" ] && ! grep -q "$KSU_DIR" "drivers/Makefile" 2>/dev/null; then
-    echo "obj-y += $KSU_DIR/" >> "drivers/Makefile"
+  if [ -f "Makefile" ] && ! grep -q "$KSU_DIR" "Makefile" 2>/dev/null; then
+    echo "obj-y += $KSU_DIR/" >> "Makefile"
   fi
 fi
 
