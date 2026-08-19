@@ -1,92 +1,223 @@
 #!/usr/bin/env bash
+# scripts/patch_ksu_manual_hook.sh
+#
+# Applies KernelSU-Next's OFFICIAL 5-file manual-hook patch set, taken
+# directly from:
+# https://kernelsu-next.github.io/webpage/pages/how-to-integrate-for-non-gki.html
+#
+# This is a genuinely different integration path from kprobes — it
+# patches real call sites in 5 core kernel files instead of relying on
+# kprobe attach points. Each insertion below is anchored to an exact,
+# unique line from the vendor 4.14 source (do_execve's argument struct
+# init, faccessat's lookup_flags declaration, etc.) rather than fuzzy
+# context matching, so it either applies cleanly or fails loudly with
+# the exact file/anchor that didn't match — it will NOT silently skip
+# and leave you with a half-patched tree like the old sed-based
+# approach did.
 set -euo pipefail
-
 : "${KERNEL_DIR:?}"
 
-echo "==> [Manual Hook] Starting code injection into core kernel..."
+cd "$KERNEL_DIR"
+FAILED=0
 
-# Helper function for safe injection (Idempotent)
-inject_hook() {
-    local file="$1"
-    local func_sig="$2"
-    local extern_decl="$3"
-    local hook_call="$4"
-
-    if [ ! -f "$file" ]; then
-        echo "[-] $file not found, skipping..."
-        return
-    fi
-
-    if grep -q "CONFIG_KSU" "$file"; then
-        echo "[~] $file is already injected with KSU, skipping..."
-        return
-    fi
-
-    echo "[+] Injecting hook into $file..."
-
-    # 1. Inject extern declaration at the top of the file (after #include lines)
-    sed -i "/#include <linux\/fs.h>/a \\
-/* KernelSU Manual Hook */\\
-#ifdef CONFIG_KSU\\
-$extern_decl\\
-#endif\\
-" "$file"
-
-    # 2. Inject call site right below the target function declaration
-    # FIXED: using index($0, sig) instead of regex matching ($0 ~ sig)
-    awk -v sig="$func_sig" -v hook="\\n#ifdef CONFIG_KSU\\n$hook_call\\n#endif\\n" '
-    BEGIN { inj=0; brace=0; }
-    index($0, sig) > 0 { inj=1; }
-    inj==1 && /{/ {
-        print $0;
-        print hook;
-        inj=2;
-        next;
-    }
-    { print $0; }
-    ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+apply_patch() {
+  # $1=file $2=marker(idempotency check) $3=python heredoc via stdin
+  local file="$1" marker="$2"
+  if [ ! -f "$file" ]; then
+    echo "::error::$file not found — can't apply manual hook patch here."
+    FAILED=1
+    return
+  fi
+  if grep -q "$marker" "$file"; then
+    echo "$file already patched, skipping."
+    return
+  fi
+  if python3 -; then
+    echo "==> Patched $file"
+  else
+    echo "::error::Failed to patch $file — anchor line not found. This vendor tree's version of this file differs from stock 4.14; you'll need to add the CONFIG_KSU hook here by hand. See the diff for $file at:"
+    echo "    https://kernelsu-next.github.io/webpage/pages/how-to-integrate-for-non-gki.html"
+    FAILED=1
+  fi
 }
 
-# --- 1. fs/exec.c (do_execveat_common / do_execve) ---
-inject_hook \
-    "$KERNEL_DIR/fs/exec.c" \
-    "static int do_execveat_common" \
-    "extern bool ksu_execveat_hook __read_mostly;\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *ptr, int *flags);\nextern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *ptr, int *flags);" \
-    "    if (unlikely(ksu_execveat_hook)) {\n        ksu_handle_execveat(&fd, &filename, &argv, &flags);\n    } else {\n        ksu_handle_execveat_sucompat(&fd, &filename, &argv, &flags);\n    }"
+# --- fs/exec.c ----------------------------------------------------------
+apply_patch "fs/exec.c" "ksu_handle_execveat" << 'PYEOF'
+import sys
+path = "fs/exec.c"
+with open(path) as f:
+    text = f.read()
 
-# --- 2. fs/open.c (faccessat) ---
-inject_hook \
-    "$KERNEL_DIR/fs/open.c" \
-    "SYSCALL_DEFINE3(faccessat" \
-    "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);" \
-    "    ksu_handle_faccessat(&dfd, &filename, &mode, NULL);"
+extern_anchor = "int do_execve(struct filename *filename,"
+extern_block = (
+    "#ifdef CONFIG_KSU\n"
+    "__attribute__((hot))\n"
+    "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n"
+    "\t\t\t\tvoid *argv, void *envp, int *flags);\n"
+    "#endif\n\n"
+)
+if extern_anchor not in text:
+    sys.exit(1)
+text = text.replace(extern_anchor, extern_block + extern_anchor, 1)
 
-# --- 3. fs/read_write.c (vfs_read) ---
-inject_hook \
-    "$KERNEL_DIR/fs/read_write.c" \
-    "ssize_t vfs_read(struct file " \
-    "extern bool ksu_vfs_read_hook __read_mostly;\nextern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);" \
-    "    if (unlikely(ksu_vfs_read_hook)) {\n        ksu_handle_vfs_read(&file, &buf, &count, &pos);\n    }"
+call_anchor_1 = "struct user_arg_ptr envp = { .ptr.native = __envp };"
+call_block = (
+    "\n#ifdef CONFIG_KSU\n"
+    "\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n"
+    "#endif"
+)
+if call_anchor_1 not in text:
+    sys.exit(1)
+text = text.replace(call_anchor_1, call_anchor_1 + call_block, 1)
 
-# --- 4. fs/stat.c (vfs_statx) ---
-inject_hook \
-    "$KERNEL_DIR/fs/stat.c" \
-    "int vfs_statx(int dfd" \
-    "extern bool ksu_vfs_statx_hook __read_mostly;\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);" \
-    "    if (unlikely(ksu_vfs_statx_hook)) {\n        ksu_handle_stat(&dfd, &filename, &flags);\n    }"
+call_anchor_2 = ".ptr.compat = __envp,\n\t};"
+call_block_2 = (
+    "\n#ifdef CONFIG_KSU // 32-bit ksud and 32-on-64 support\n"
+    "\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n"
+    "#endif"
+)
+if call_anchor_2 not in text:
+    sys.exit(1)
+text = text.replace(call_anchor_2, call_anchor_2 + call_block_2, 1)
 
-# --- 5. kernel/reboot.c (sys_reboot) ---
-inject_hook \
-    "$KERNEL_DIR/kernel/reboot.c" \
-    "SYSCALL_DEFINE4(reboot" \
-    "extern int ksu_handle_reboot(int *magic1, int *magic2, unsigned int *cmd, void __user **arg);" \
-    "    ksu_handle_reboot(&magic1, &magic2, &cmd, &arg);"
+with open(path, "w") as f:
+    f.write(text)
+PYEOF
 
-# --- 6. (Bonus KSU-Next) drivers/input/input.c (Volume Keys) ---
-inject_hook \
-    "$KERNEL_DIR/drivers/input/input.c" \
-    "static void input_handle_event" \
-    "extern bool ksu_input_hook __read_mostly;\nextern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);" \
-    "    if (unlikely(ksu_input_hook)) {\n        ksu_handle_input_handle_event(&type, &code, &value);\n    }"
+# --- fs/open.c ------------------------------------------------------------
+apply_patch "fs/open.c" "ksu_handle_faccessat" << 'PYEOF'
+import sys
+path = "fs/open.c"
+with open(path) as f:
+    text = f.read()
 
-echo "==> [Manual Hook] Integration complete."
+extern_anchor = "SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)"
+extern_block = (
+    "#ifdef CONFIG_KSU\n"
+    "__attribute__((hot))\n"
+    "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n"
+    "\t\t\t\tint *mode, int *flags);\n"
+    "#endif\n\n"
+)
+if extern_anchor not in text:
+    sys.exit(1)
+text = text.replace(extern_anchor, extern_block + extern_anchor, 1)
+
+call_anchor = "unsigned int lookup_flags = LOOKUP_FOLLOW;"
+call_block = (
+    "\n\n#ifdef CONFIG_KSU\n"
+    "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
+    "#endif"
+)
+if call_anchor not in text:
+    sys.exit(1)
+text = text.replace(call_anchor, call_anchor + call_block, 1)
+
+with open(path, "w") as f:
+    f.write(text)
+PYEOF
+
+# --- fs/read_write.c --------------------------------------------------
+apply_patch "fs/read_write.c" "ksu_handle_sys_read" << 'PYEOF'
+import sys
+path = "fs/read_write.c"
+with open(path) as f:
+    text = f.read()
+
+extern_anchor = "SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)"
+extern_block = (
+    "#ifdef CONFIG_KSU\n"
+    "extern bool ksu_vfs_read_hook __read_mostly;\n"
+    "extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd,\n"
+    "\t\t\t\tchar __user **buf_ptr, size_t *count_ptr);\n"
+    "#endif\n\n"
+)
+if extern_anchor not in text:
+    sys.exit(1)
+text = text.replace(extern_anchor, extern_block + extern_anchor, 1)
+
+call_anchor = "ssize_t ret = -EBADF;"
+call_block = (
+    "\n\n#ifdef CONFIG_KSU\n"
+    "\tif (unlikely(ksu_vfs_read_hook))\n"
+    "\t\tksu_handle_sys_read(fd, &buf, &count);\n"
+    "#endif"
+)
+if call_anchor not in text:
+    sys.exit(1)
+text = text.replace(call_anchor, call_anchor + call_block, 1)
+
+with open(path, "w") as f:
+    f.write(text)
+PYEOF
+
+# --- fs/stat.c ------------------------------------------------------------
+apply_patch "fs/stat.c" "ksu_handle_stat" << 'PYEOF'
+import sys
+path = "fs/stat.c"
+with open(path) as f:
+    text = f.read()
+
+extern_anchor = "SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,"
+extern_block = (
+    "#ifdef CONFIG_KSU\n"
+    "__attribute__((hot))\n"
+    "extern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n"
+    "\t\t\t\tint *flags);\n"
+    "#endif\n\n"
+)
+if extern_anchor not in text:
+    sys.exit(1)
+text = text.replace(extern_anchor, extern_block + extern_anchor, 1)
+
+call_anchor = "int error;"
+call_block = (
+    "\n\n#ifdef CONFIG_KSU\n"
+    "\tksu_handle_stat(&dfd, &filename, &flag);\n"
+    "#endif"
+)
+if call_anchor not in text:
+    sys.exit(1)
+text = text.replace(call_anchor, call_anchor + call_block, 1)
+
+with open(path, "w") as f:
+    f.write(text)
+PYEOF
+
+# --- kernel/reboot.c --------------------------------------------------
+apply_patch "kernel/reboot.c" "ksu_handle_sys_reboot" << 'PYEOF'
+import sys
+path = "kernel/reboot.c"
+with open(path) as f:
+    text = f.read()
+
+extern_anchor = "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,"
+extern_block = (
+    "#ifdef CONFIG_KSU\n"
+    "extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n"
+    "#endif\n\n"
+)
+if extern_anchor not in text:
+    sys.exit(1)
+text = text.replace(extern_anchor, extern_block + extern_anchor, 1)
+
+call_anchor = "int ret = 0;"
+call_block = (
+    "\n\n#ifdef CONFIG_KSU\n"
+    "\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
+    "#endif"
+)
+if call_anchor not in text:
+    sys.exit(1)
+text = text.replace(call_anchor, call_anchor + call_block, 1)
+
+with open(path, "w") as f:
+    f.write(text)
+PYEOF
+
+if [ "$FAILED" = "1" ]; then
+  echo "::error::One or more manual-hook patches failed to apply — see errors above. Build will likely fail at link time again until these are fixed (either by hand, or by pasting me the actual surrounding code from the file(s) that failed so I can fix the anchor)."
+  exit 1
+fi
+
+echo "All 5 manual-hook patches applied successfully."
