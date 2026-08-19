@@ -26,7 +26,6 @@ runs:
           ARCH="$ARCH"
           O=out
           CC=clang
-          LD=ld.lld
           CLANG_TRIPLE=aarch64-linux-gnu-
           CROSS_COMPILE=aarch64-linux-android-
           CROSS_COMPILE_ARM32=arm-linux-androideabi-

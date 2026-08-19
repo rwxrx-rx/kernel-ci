@@ -68,40 +68,59 @@ echo "KSU_DIR=$KSU_DIR" >> "$GITHUB_ENV"
 # it could find inside $KSU_DIR. That never touched the real switch
 # (CONFIG_KSU_KPROBE_HOOKS) and left a broken half-patched hybrid build.
 #
-# Manual hook mode is now done properly: the 5 official upstream patches
-# (fs/exec.c, fs/open.c, fs/read_write.c, fs/stat.c, kernel/reboot.c)
-# from KernelSU-Next's own non-GKI integration guide —
-# https://kernelsu-next.github.io/webpage/pages/how-to-integrate-for-non-gki.html
-# — applied via scripts/patch_ksu_manual_hook.sh, with CONFIG_KSU_KPROBE_HOOKS
-# left OFF so the driver doesn't also try to install kprobes.
+# Manual hook is now done properly, via each fork's actual documented
+# call-site API — which turned out to differ by lineage:
+#   - kernelsu-next-legacy: KernelSU-Next's own API (do_execve, a
+#     reboot.c hook it added itself, etc) — patch_ksu_manual_hook.sh
+#     https://kernelsu-next.github.io/webpage/pages/how-to-integrate-for-non-gki.html
+#   - resukisu / sukisu-ultra / wildksu: all forked from the ORIGINAL
+#     tiann/KernelSU, which uses different function names entirely
+#     (do_execveat_common, vfs_read, vfs_statx) —
+#     patch_ksu_manual_hook_upstream.sh
+#     https://kernelsu.org/guide/how-to-integrate-for-non-gki.html
+#   - xxksu: no verified manual-hook doc found for this one — stays on
+#     kprobes until you point me at its actual integration guide.
 #
-# Only wired up for kernelsu-next-legacy right now — it's the only fork
-# whose manual-hook patch set I've actually verified against an
-# authoritative source. The other forks (ReSukiSU, SukiSU Ultra, Wild
-# KSU, xxKSU) may need their own equivalent patches; tell me which one
-# you want and I'll look up its real integration doc before wiring it
-# in, rather than guessing.
+# Both manual-hook scripts also patch drivers/input/input.c (Safe Mode)
+# — that's genuinely where `ksu_input_hook` comes from, a separate
+# feature from the syscall hooks, missing from KernelSU-Next's own
+# non-GKI page entirely (which is why the very first attempt at this
+# undefined the symbol: the 5 syscall patches never touch input.c).
+# The official guide is explicit that CONFIG_KPROBES must be OFF when
+# using manual integration, or Safe Mode can false-trigger on a
+# volume-down press at boot — so it's disabled outright below, not just
+# left unset.
 DEFCONFIG_PATH="arch/${ARCH}/configs/${DEFCONFIG}"
-if [ "$KSU_VARIANT" = "kernelsu-next-legacy" ]; then
-  echo "==> Applying KernelSU-Next's official manual-hook patch set (5 files)"
-  bash "$(dirname "${BASH_SOURCE[0]}")/patch_ksu_manual_hook.sh"
+disable_kprobes() {
+  grep -q '^CONFIG_KPROBES=y' "$DEFCONFIG_PATH" 2>/dev/null && sed -i '/^CONFIG_KPROBES=y/d' "$DEFCONFIG_PATH"
+  grep -q '^# CONFIG_KPROBES is not set' "$DEFCONFIG_PATH" 2>/dev/null || echo '# CONFIG_KPROBES is not set' >> "$DEFCONFIG_PATH"
+}
+set_flags() {
+  for flag in "$@"; do
+    key="${flag%%=*}"
+    grep -q "^${key}=" "$DEFCONFIG_PATH" 2>/dev/null && sed -i "/^${key}=/d" "$DEFCONFIG_PATH"
+    echo "$flag" >> "$DEFCONFIG_PATH"
+  done
+}
 
-  for flag in CONFIG_MODULES=y; do
-    key="${flag%%=*}"
-    grep -q "^${key}=" "$DEFCONFIG_PATH" 2>/dev/null && sed -i "/^${key}=/d" "$DEFCONFIG_PATH"
-    echo "$flag" >> "$DEFCONFIG_PATH"
-  done
-  # Deliberately NOT setting CONFIG_KSU_KPROBE_HOOKS=y here — leaving it
-  # unset is what tells KernelSU-Next to use the manually-patched call
-  # sites above instead of installing kprobes.
-elif [ "$KSU_VARIANT" != "none" ]; then
-  echo "==> Enabling kprobe-based hooks for $KSU_VARIANT (no verified manual-hook patch set for this fork yet)"
-  for flag in CONFIG_KPROBES=y CONFIG_KPROBE_EVENTS=y CONFIG_KSU_KPROBE_HOOKS=y CONFIG_MODULES=y; do
-    key="${flag%%=*}"
-    grep -q "^${key}=" "$DEFCONFIG_PATH" 2>/dev/null && sed -i "/^${key}=/d" "$DEFCONFIG_PATH"
-    echo "$flag" >> "$DEFCONFIG_PATH"
-  done
-fi
+case "$KSU_VARIANT" in
+  kernelsu-next-legacy)
+    echo "==> Applying KernelSU-Next's manual-hook patch set (5 syscall files + Safe Mode)"
+    bash "$(dirname "${BASH_SOURCE[0]}")/patch_ksu_manual_hook.sh"
+    disable_kprobes
+    set_flags CONFIG_MODULES=y
+    ;;
+  resukisu|sukisu-ultra|wildksu)
+    echo "==> Applying upstream-KernelSU-lineage manual-hook patch set for $KSU_VARIANT (4 syscall files + Safe Mode)"
+    bash "$(dirname "${BASH_SOURCE[0]}")/patch_ksu_manual_hook_upstream.sh"
+    disable_kprobes
+    set_flags CONFIG_MODULES=y
+    ;;
+  xxksu)
+    echo "==> Enabling kprobe-based hooks for xxKSU (no verified manual-hook patch set for this fork yet — tell me its integration doc and I'll wire manual mode in)"
+    set_flags CONFIG_KPROBES=y CONFIG_KPROBE_EVENTS=y CONFIG_KSU_KPROBE_HOOKS=y CONFIG_MODULES=y
+    ;;
+esac
 
 # Make sure the defconfig actually enables KSU
 if ! grep -q '^CONFIG_KSU=y' "arch/${ARCH}/configs/${DEFCONFIG}" 2>/dev/null; then

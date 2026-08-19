@@ -22,13 +22,17 @@ append_defconfig() {
   done <<< "$1"
 }
 
-# 1. Fix KSU boottime (timespec mismatch on kernel 4.14)
-# (Aman untuk vanilla: find -L tidak akan menemukan apapun jika tidak ada KSU, loop dilewati otomatis)
-for EVENT_C in $(find -L "$KERNEL_DIR" -type f -path "*/kernelsu*/event.c" 2>/dev/null); do
-  echo "==> Fixing boottime struct in $EVENT_C"
-  sed -i 's/struct timespec64/struct timespec/g' "$EVENT_C"
-  sed -i 's/ktime_get_boottime_ts64/get_monotonic_boottime/g' "$EVENT_C"
-done
+# 1. REMOVED: the timespec64/boottime sed-fix and the setenforce/
+# ksu_input_hook stub file that used to live here are both gone.
+# Turns out neither was addressing a real KernelSU-Next requirement —
+# see patch_ksu.sh's "Hook mode" section for the full story: the actual
+# problem was an earlier attempt at forcing "manual hook" mode that
+# half-patched the driver against the wrong Kconfig symbol, producing
+# a broken hybrid build. Those two undefined symbols aren't part of
+# KernelSU-Next's documented integration for either kprobe or manual
+# mode. patch_ksu.sh now just sets up kprobe mode properly (the
+# fork's own recommended default) and doesn't touch driver source at
+# all, which is what actually fixes this class of error.
 
 # 2. Check TCP BBR/Westwood
 if [ "${FEATURE_TCP_BBR:-false}" = "true" ] && [ "${FEATURE_TCP_WESTWOOD:-false}" = "true" ]; then

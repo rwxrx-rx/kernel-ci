@@ -27,7 +27,7 @@ runs:
         # failed mid-fetch) got restored and silently skipped re-fetching
         # in a later run. Bump this again any time you suspect a poisoned
         # cache — cheaper than debugging "binary not found" errors.
-        key: toolchain-${{ inputs.clang }}-${{ runner.os }}-v3
+        key: toolchain-${{ inputs.clang }}-${{ runner.os }}-v2
 
     # Every fetch step below checks for the actual binary on disk rather
     # than trusting `cache-hit` alone. That was the actual bug: a

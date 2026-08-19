@@ -220,4 +220,51 @@ if [ "$FAILED" = "1" ]; then
   exit 1
 fi
 
-echo "All 5 manual-hook patches applied successfully."
+# --- Safe Mode (drivers/input/input.c) --------------------------------
+#
+# THIS is where ksu_input_hook actually comes from — not the 5 files
+# above. It's a separate, optional-but-recommended feature (volume-down
+# at boot triggers Safe Mode / temporarily disables KSU) documented at
+# https://kernelsu.org/guide/how-to-integrate-for-non-gki.html#safe-mode
+# and missing from KernelSU-Next's own non-GKI page, which is why the
+# very first "undefined symbol: ksu_input_hook" error happened — the 5
+# call-site patches never touched input.c at all, so the symbol this
+# driver expects was simply never provided anywhere in the tree.
+apply_patch "drivers/input/input.c" "ksu_handle_input_handle_event" << 'PYEOF'
+import sys
+path = "drivers/input/input.c"
+with open(path) as f:
+    text = f.read()
+
+extern_anchor = "static void input_handle_event(struct input_dev *dev,"
+extern_block = (
+    "#ifdef CONFIG_KSU\n"
+    "extern bool ksu_input_hook __read_mostly;\n"
+    "extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n"
+    "#endif\n\n"
+)
+if extern_anchor not in text:
+    sys.exit(1)
+text = text.replace(extern_anchor, extern_block + extern_anchor, 1)
+
+call_anchor = "int disposition = input_get_disposition(dev, type, code, &value);"
+call_block = (
+    "\n#ifdef CONFIG_KSU\n"
+    "\tif (unlikely(ksu_input_hook))\n"
+    "\t\tksu_handle_input_handle_event(&type, &code, &value);\n"
+    "#endif"
+)
+if call_anchor not in text:
+    sys.exit(1)
+text = text.replace(call_anchor, call_anchor + call_block, 1)
+
+with open(path, "w") as f:
+    f.write(text)
+PYEOF
+
+if [ "$FAILED" = "1" ]; then
+  echo "::error::Safe Mode (input.c) or another patch failed — see errors above."
+  exit 1
+fi
+
+echo "All manual-hook patches applied successfully (5 syscall hooks + Safe Mode)."
