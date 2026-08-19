@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 # scripts/patch_ksu_manual_hook.sh
 #
-# Applies KernelSU-Next's OFFICIAL 5-file manual-hook patch set, taken
-# directly from:
+# Applies KernelSU-Next's OFFICIAL manual-hook patch set (5 syscall
+# files + Safe Mode), taken directly from:
 # https://kernelsu-next.github.io/webpage/pages/how-to-integrate-for-non-gki.html
 #
-# This is a genuinely different integration path from kprobes — it
-# patches real call sites in 5 core kernel files instead of relying on
-# kprobe attach points. Each insertion below is anchored to an exact,
-# unique line from the vendor 4.14 source (do_execve's argument struct
-# init, faccessat's lookup_flags declaration, etc.) rather than fuzzy
-# context matching, so it either applies cleanly or fails loudly with
-# the exact file/anchor that didn't match — it will NOT silently skip
-# and leave you with a half-patched tree like the old sed-based
-# approach did.
+# BUG FIXED: earlier version used a plain whole-file
+# `text.replace(anchor, ..., 1)` for the call-site insertion. Some of
+# those anchor lines (e.g. "unsigned int lookup_flags = LOOKUP_FOLLOW;"
+# in fs/open.c) aren't unique to the target function — they're a common
+# local-variable-init pattern repeated across several functions in the
+# same file. replace(..., 1) grabbed whichever occurrence came FIRST in
+# the file, which was sometimes a different, earlier function — landing
+# the call where dfd/filename/mode don't exist ("undeclared identifier")
+# and, if that earlier spot was before the extern declaration too,
+# "implicit declaration of function" as well. Every insertion below now
+# searches for its call-site anchor starting AFTER the function
+# signature it belongs to, so it can't grab an unrelated earlier match.
 set -euo pipefail
 : "${KERNEL_DIR:?}"
 
@@ -35,18 +38,41 @@ apply_patch() {
   if python3 -; then
     echo "==> Patched $file"
   else
-    echo "::error::Failed to patch $file — anchor line not found. This vendor tree's version of this file differs from stock 4.14; you'll need to add the CONFIG_KSU hook here by hand. See the diff for $file at:"
-    echo "    https://kernelsu-next.github.io/webpage/pages/how-to-integrate-for-non-gki.html"
+    echo "::error::Failed to patch $file — anchor line not found (or found in an unexpected place). This vendor tree's version of this file differs from stock 4.14; paste me the relevant function and I'll fix the anchor."
     FAILED=1
   fi
 }
 
-# --- fs/exec.c ----------------------------------------------------------
-apply_patch "fs/exec.c" "ksu_handle_execveat" << 'PYEOF'
+# Shared helper, prepended to every python heredoc below: inserts
+# extern_block right before extern_anchor, then inserts call_block right
+# after the FIRST call_anchor match found AFTER that point — never
+# before it, so it can't land in an earlier, unrelated function.
+PY_HELPER='
 import sys
+
+def patch_one(path, extern_anchor, extern_block, call_anchor, call_block, search_from=0):
+    with open(path) as f:
+        text = f.read()
+    idx = text.find(extern_anchor, search_from)
+    if idx == -1:
+        sys.exit(1)
+    text = text[:idx] + extern_block + text[idx:]
+    search_start = idx + len(extern_block) + len(extern_anchor)
+    call_idx = text.find(call_anchor, search_start)
+    if call_idx == -1:
+        sys.exit(1)
+    insert_at = call_idx + len(call_anchor)
+    text = text[:insert_at] + call_block + text[insert_at:]
+    with open(path, "w") as f:
+        f.write(text)
+    return search_start  # caller can chain a second patch from here
+'
+
+# --- fs/exec.c ------------------------------------------------------------
+apply_patch "fs/exec.c" "ksu_handle_execveat" << PYEOF
+${PY_HELPER}
+
 path = "fs/exec.c"
-with open(path) as f:
-    text = f.read()
 
 extern_anchor = "int do_execve(struct filename *filename,"
 extern_block = (
@@ -56,163 +82,103 @@ extern_block = (
     "\t\t\t\tvoid *argv, void *envp, int *flags);\n"
     "#endif\n\n"
 )
-if extern_anchor not in text:
-    sys.exit(1)
-text = text.replace(extern_anchor, extern_block + extern_anchor, 1)
-
 call_anchor_1 = "struct user_arg_ptr envp = { .ptr.native = __envp };"
-call_block = (
+call_block_1 = (
     "\n#ifdef CONFIG_KSU\n"
     "\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n"
     "#endif"
 )
-if call_anchor_1 not in text:
-    sys.exit(1)
-text = text.replace(call_anchor_1, call_anchor_1 + call_block, 1)
+next_start = patch_one("fs/exec.c", extern_anchor, extern_block, call_anchor_1, call_block_1)
 
+# Second call site (compat_do_execve) comes after do_execve in the file
+# — search continues from where the first patch left off, so this can
+# only match the *next* occurrence, not re-match the one just patched.
+with open(path) as f:
+    text = f.read()
 call_anchor_2 = ".ptr.compat = __envp,\n\t};"
 call_block_2 = (
     "\n#ifdef CONFIG_KSU // 32-bit ksud and 32-on-64 support\n"
     "\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n"
     "#endif"
 )
-if call_anchor_2 not in text:
+call_idx = text.find(call_anchor_2, next_start)
+if call_idx == -1:
     sys.exit(1)
-text = text.replace(call_anchor_2, call_anchor_2 + call_block_2, 1)
-
+insert_at = call_idx + len(call_anchor_2)
+text = text[:insert_at] + call_block_2 + text[insert_at:]
 with open(path, "w") as f:
     f.write(text)
 PYEOF
 
-# --- fs/open.c ------------------------------------------------------------
-apply_patch "fs/open.c" "ksu_handle_faccessat" << 'PYEOF'
-import sys
-path = "fs/open.c"
-with open(path) as f:
-    text = f.read()
-
-extern_anchor = "SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)"
-extern_block = (
+# --- fs/open.c --------------------------------------------------------
+apply_patch "fs/open.c" "ksu_handle_faccessat" << PYEOF
+${PY_HELPER}
+patch_one(
+    "fs/open.c",
+    "SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)",
     "#ifdef CONFIG_KSU\n"
     "__attribute__((hot))\n"
-    "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n"
+    "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_ptr,\n"
     "\t\t\t\tint *mode, int *flags);\n"
-    "#endif\n\n"
-)
-if extern_anchor not in text:
-    sys.exit(1)
-text = text.replace(extern_anchor, extern_block + extern_anchor, 1)
-
-call_anchor = "unsigned int lookup_flags = LOOKUP_FOLLOW;"
-call_block = (
+    "#endif\n\n",
+    "unsigned int lookup_flags = LOOKUP_FOLLOW;",
     "\n\n#ifdef CONFIG_KSU\n"
     "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
-    "#endif"
+    "#endif",
 )
-if call_anchor not in text:
-    sys.exit(1)
-text = text.replace(call_anchor, call_anchor + call_block, 1)
-
-with open(path, "w") as f:
-    f.write(text)
 PYEOF
 
 # --- fs/read_write.c --------------------------------------------------
-apply_patch "fs/read_write.c" "ksu_handle_sys_read" << 'PYEOF'
-import sys
-path = "fs/read_write.c"
-with open(path) as f:
-    text = f.read()
-
-extern_anchor = "SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)"
-extern_block = (
+apply_patch "fs/read_write.c" "ksu_handle_sys_read" << PYEOF
+${PY_HELPER}
+patch_one(
+    "fs/read_write.c",
+    "SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)",
     "#ifdef CONFIG_KSU\n"
     "extern bool ksu_vfs_read_hook __read_mostly;\n"
     "extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd,\n"
     "\t\t\t\tchar __user **buf_ptr, size_t *count_ptr);\n"
-    "#endif\n\n"
-)
-if extern_anchor not in text:
-    sys.exit(1)
-text = text.replace(extern_anchor, extern_block + extern_anchor, 1)
-
-call_anchor = "ssize_t ret = -EBADF;"
-call_block = (
+    "#endif\n\n",
+    "ssize_t ret = -EBADF;",
     "\n\n#ifdef CONFIG_KSU\n"
     "\tif (unlikely(ksu_vfs_read_hook))\n"
     "\t\tksu_handle_sys_read(fd, &buf, &count);\n"
-    "#endif"
+    "#endif",
 )
-if call_anchor not in text:
-    sys.exit(1)
-text = text.replace(call_anchor, call_anchor + call_block, 1)
-
-with open(path, "w") as f:
-    f.write(text)
 PYEOF
 
 # --- fs/stat.c ------------------------------------------------------------
-apply_patch "fs/stat.c" "ksu_handle_stat" << 'PYEOF'
-import sys
-path = "fs/stat.c"
-with open(path) as f:
-    text = f.read()
-
-extern_anchor = "SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,"
-extern_block = (
+apply_patch "fs/stat.c" "ksu_handle_stat" << PYEOF
+${PY_HELPER}
+patch_one(
+    "fs/stat.c",
+    "SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,",
     "#ifdef CONFIG_KSU\n"
     "__attribute__((hot))\n"
     "extern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n"
     "\t\t\t\tint *flags);\n"
-    "#endif\n\n"
-)
-if extern_anchor not in text:
-    sys.exit(1)
-text = text.replace(extern_anchor, extern_block + extern_anchor, 1)
-
-call_anchor = "int error;"
-call_block = (
+    "#endif\n\n",
+    "int error;",
     "\n\n#ifdef CONFIG_KSU\n"
     "\tksu_handle_stat(&dfd, &filename, &flag);\n"
-    "#endif"
+    "#endif",
 )
-if call_anchor not in text:
-    sys.exit(1)
-text = text.replace(call_anchor, call_anchor + call_block, 1)
-
-with open(path, "w") as f:
-    f.write(text)
 PYEOF
 
 # --- kernel/reboot.c --------------------------------------------------
-apply_patch "kernel/reboot.c" "ksu_handle_sys_reboot" << 'PYEOF'
-import sys
-path = "kernel/reboot.c"
-with open(path) as f:
-    text = f.read()
-
-extern_anchor = "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,"
-extern_block = (
+apply_patch "kernel/reboot.c" "ksu_handle_sys_reboot" << PYEOF
+${PY_HELPER}
+patch_one(
+    "kernel/reboot.c",
+    "SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,",
     "#ifdef CONFIG_KSU\n"
     "extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n"
-    "#endif\n\n"
-)
-if extern_anchor not in text:
-    sys.exit(1)
-text = text.replace(extern_anchor, extern_block + extern_anchor, 1)
-
-call_anchor = "int ret = 0;"
-call_block = (
+    "#endif\n\n",
+    "int ret = 0;",
     "\n\n#ifdef CONFIG_KSU\n"
     "\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
-    "#endif"
+    "#endif",
 )
-if call_anchor not in text:
-    sys.exit(1)
-text = text.replace(call_anchor, call_anchor + call_block, 1)
-
-with open(path, "w") as f:
-    f.write(text)
 PYEOF
 
 if [ "$FAILED" = "1" ]; then
@@ -221,45 +187,21 @@ if [ "$FAILED" = "1" ]; then
 fi
 
 # --- Safe Mode (drivers/input/input.c) --------------------------------
-#
-# THIS is where ksu_input_hook actually comes from — not the 5 files
-# above. It's a separate, optional-but-recommended feature (volume-down
-# at boot triggers Safe Mode / temporarily disables KSU) documented at
-# https://kernelsu.org/guide/how-to-integrate-for-non-gki.html#safe-mode
-# and missing from KernelSU-Next's own non-GKI page, which is why the
-# very first "undefined symbol: ksu_input_hook" error happened — the 5
-# call-site patches never touched input.c at all, so the symbol this
-# driver expects was simply never provided anywhere in the tree.
-apply_patch "drivers/input/input.c" "ksu_handle_input_handle_event" << 'PYEOF'
-import sys
-path = "drivers/input/input.c"
-with open(path) as f:
-    text = f.read()
-
-extern_anchor = "static void input_handle_event(struct input_dev *dev,"
-extern_block = (
+apply_patch "drivers/input/input.c" "ksu_handle_input_handle_event" << PYEOF
+${PY_HELPER}
+patch_one(
+    "drivers/input/input.c",
+    "static void input_handle_event(struct input_dev *dev,",
     "#ifdef CONFIG_KSU\n"
     "extern bool ksu_input_hook __read_mostly;\n"
     "extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n"
-    "#endif\n\n"
-)
-if extern_anchor not in text:
-    sys.exit(1)
-text = text.replace(extern_anchor, extern_block + extern_anchor, 1)
-
-call_anchor = "int disposition = input_get_disposition(dev, type, code, &value);"
-call_block = (
+    "#endif\n\n",
+    "int disposition = input_get_disposition(dev, type, code, &value);",
     "\n#ifdef CONFIG_KSU\n"
     "\tif (unlikely(ksu_input_hook))\n"
     "\t\tksu_handle_input_handle_event(&type, &code, &value);\n"
-    "#endif"
+    "#endif",
 )
-if call_anchor not in text:
-    sys.exit(1)
-text = text.replace(call_anchor, call_anchor + call_block, 1)
-
-with open(path, "w") as f:
-    f.write(text)
 PYEOF
 
 if [ "$FAILED" = "1" ]; then
