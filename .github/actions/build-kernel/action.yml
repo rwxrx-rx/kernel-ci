@@ -26,11 +26,27 @@ runs:
           ARCH="$ARCH"
           O=out
           CC=clang
+          LD=ld.lld
           CLANG_TRIPLE=aarch64-linux-gnu-
           CROSS_COMPILE=aarch64-linux-android-
           CROSS_COMPILE_ARM32=arm-linux-androideabi-
           LLVM=1
           LLVM_IAS=1
+          # Host-side tools (fixdep, conf, genheaders, the vdso build
+          # helpers, ...) run ON THE RUNNER, not the target device — they
+          # must link against the runner's own modern glibc. Without
+          # this, Kbuild falls back to plain `ld`/`gcc` resolved via
+          # $PATH, which — because toolchain/bin is prepended to PATH by
+          # setup-toolchain — picks up ProtonClang's OWN bundled `ld`
+          # instead of the system one. That bundled ld is old enough to
+          # not understand `.relr.dyn` (a modern ELF/glibc relocation
+          # section), so every host tool link fails with "unknown type
+          # [0x13] section .relr.dyn" / "skipping incompatible libc.so.6"
+          # — which is what was actually breaking vdso/genheaders/etc in
+          # both the vanilla and KSU builds (this was never KSU-specific).
+          HOSTCC=/usr/bin/gcc
+          HOSTCXX=/usr/bin/g++
+          HOSTLD=/usr/bin/ld
         )
 
         make "${MAKE_ARGS[@]}" "$DEFCONFIG"
