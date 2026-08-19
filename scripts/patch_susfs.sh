@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# scripts/patch_susfs.sh
-# Applies susfs4ksu (pinned tag $SUSFS_TAG, branch $SUSFS_BRANCH) into
-# $KERNEL_DIR on top of whichever KSU fork patch_ksu.sh just integrated.
-# Follows the standard susfs4ksu layout: KernelSU/ patch, kernel/ patch,
-# then loose fs/ + include/linux/ files copied in directly.
 set -euo pipefail
 
 if [ "${KSU_VARIANT:-}" = "none" ]; then
@@ -17,12 +12,11 @@ fi
 : "${SUSFS_TAG:?}"
 
 if [ -z "${KSU_DIR:-}" ]; then
-    if [ -d "$KERNEL_DIR/KernelSU-Next" ]; then
-        KSU_DIR="KernelSU-Next"
-    elif [ -d "$KERNEL_DIR/KernelSU" ]; then
-        KSU_DIR="KernelSU"
+    KSU_PATH=$(find "$KERNEL_DIR" -type d \( -name "KernelSU-Next" -o -name "KernelSU" -o -name "kernelsu" \) | head -n 1)
+    if [ -n "$KSU_PATH" ]; then
+        KSU_DIR=$(realpath --relative-to="$KERNEL_DIR" "$KSU_PATH")
     else
-        echo "::error::KSU_DIR not set and could not be detected automatically."
+        echo "::error::KSU directory could not be detected automatically inside $KERNEL_DIR."
         exit 1
     fi
 fi
@@ -83,4 +77,4 @@ for flag in \
   grep -q "^${flag%%=*}=" "$DEFCONFIG_PATH" 2>/dev/null || echo "$flag" >> "$DEFCONFIG_PATH"
 done
 
-echo "susfs4ksu integration step finished. Review *.rej files above if any were printed — non-GKI vendor trees this old routinely need a couple of hand-applied hunks."
+echo "susfs4ksu integration step finished."
