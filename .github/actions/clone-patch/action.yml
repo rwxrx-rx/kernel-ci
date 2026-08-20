@@ -1,4 +1,4 @@
-name: "Clone + Patch (SUSFS-Fixed v2)"
+name: "Clone + Patch "
 description: "Clones kernel + integrates KSU + SUSFS dengan intelligent conflict resolution & header fixes"
 
 inputs:
@@ -230,22 +230,13 @@ runs:
           echo "✓ include/linux/susfs.h found"
         fi
         
-        # 2. Ensure fs/proc/task_mmu.c has SUSFS include
+        # 2. Ensure fs/proc/task_mmu.c has SUSFS include safely
         if [ -f "fs/proc/task_mmu.c" ]; then
-          if ! grep -q "#include.*susfs" fs/proc/task_mmu.c; then
-            echo "⚠ fs/proc/task_mmu.c missing SUSFS include, adding..."
-            
-            # Find the line with CONFIG_KSU_SUSFS ifdef and add include
-            if grep -q "CONFIG_KSU_SUSFS" fs/proc/task_mmu.c; then
-              # Add include right after CONFIG_KSU_SUSFS check
-              sed -i '/#ifdef CONFIG_KSU_SUSFS/a #include <linux/susfs.h>' fs/proc/task_mmu.c
-              echo "✓ Added SUSFS include to task_mmu.c (after CONFIG_KSU_SUSFS)"
-            else
-              # Add at top of file after other includes
-              sed -i '1,/^#include/{ /^#include.*\/$/a #include <linux/susfs.h>
-              }' fs/proc/task_mmu.c
-              echo "✓ Added SUSFS include to task_mmu.c (top)"
-            fi
+          if ! grep -q "linux/susfs.h" fs/proc/task_mmu.c; then
+            echo "⚠ fs/proc/task_mmu.c missing SUSFS include, forcing injection..."
+            # Menyisipkan include susfs tepat di line pertama kali dia menemukan string '#include'
+            sed -i '0,/#include/s//#include <linux/susfs.h>\n&/' fs/proc/task_mmu.c
+            echo "✓ Added SUSFS include to task_mmu.c"
           else
             echo "✓ SUSFS include already in fs/proc/task_mmu.c"
           fi
@@ -258,11 +249,9 @@ runs:
         if [ -n "$susfs_funcs" ]; then
           echo "Found SUSFS function calls in:"
           echo "$susfs_funcs" | while read file; do
-            if [ -f "$file" ] && ! grep -q "#include.*susfs" "$file"; then
+            if [ -f "$file" ] && ! grep -q "linux/susfs.h" "$file"; then
               echo "  ⚠ $file uses SUSFS but missing include"
-              # Add include
-              sed -i '1,/^#include/ { /^#include.*linux.*h"$/a #ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#endif
-              }' "$file"
+              sed -i '0,/#include/s//#include <linux/susfs.h>\n&/' "$file"
               echo "    ✓ Added SUSFS include"
             else
               echo "  ✓ $file has SUSFS include"
