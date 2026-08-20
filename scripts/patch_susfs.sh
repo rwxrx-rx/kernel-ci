@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/patch_susfs_fixed.sh
+# scripts/patch_susfs.sh
 # Enhanced version of patch_susfs.sh dengan auto-recovery untuk conflicts
 # Supports kernel 4.14 dengan custom branch (lineage-23.2-fts-fixed)
 
