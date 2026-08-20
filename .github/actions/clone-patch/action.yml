@@ -234,8 +234,8 @@ runs:
         if [ -f "fs/proc/task_mmu.c" ]; then
           if ! grep -q "linux/susfs.h" fs/proc/task_mmu.c; then
             echo "⚠ fs/proc/task_mmu.c missing SUSFS include, forcing injection..."
-            # Menyisipkan include susfs tepat di line pertama kali dia menemukan string '#include'
-            sed -i '0,/#include/s//#include <linux/susfs.h>\n&/' fs/proc/task_mmu.c
+            # FIXED: Menggunakan '@' sebagai delimiter agar '/' tidak bentrok
+            sed -i '0,/#include/s@^#include.*@#include <linux/susfs.h>\n&@' fs/proc/task_mmu.c
             echo "✓ Added SUSFS include to task_mmu.c"
           else
             echo "✓ SUSFS include already in fs/proc/task_mmu.c"
@@ -251,7 +251,8 @@ runs:
           echo "$susfs_funcs" | while read file; do
             if [ -f "$file" ] && ! grep -q "linux/susfs.h" "$file"; then
               echo "  ⚠ $file uses SUSFS but missing include"
-              sed -i '0,/#include/s//#include <linux/susfs.h>\n&/' "$file"
+              # FIXED: Menggunakan '@' sebagai delimiter di sini juga
+              sed -i '0,/#include/s@^#include.*@#include <linux/susfs.h>\n&@' "$file"
               echo "    ✓ Added SUSFS include"
             else
               echo "  ✓ $file has SUSFS include"
@@ -284,6 +285,7 @@ runs:
         done
         
         echo "✓ SUSFS headers & declarations verified/fixed"
+
 
     - name: Enable OverlayFS + stage Mountify
       if: inputs.overlayfs_mountify == 'true'
