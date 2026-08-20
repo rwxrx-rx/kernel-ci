@@ -61,6 +61,27 @@ esac
 
 echo "KSU_DIR=$KSU_DIR" >> "$GITHUB_ENV"
 
+# --- sulog/event.c compat fix (timespec64 vs timespec) -----------------
+#
+# Unrelated to hook mode — this is a genuine kernel-version mismatch:
+# KernelSU-Next's "sulog" usage-logging feature calls
+# ktime_get_boottime_ts64() with a `struct timespec64`, but on this old
+# non-GKI 4.14 tree the available compat wrapper is the pre-Y2038
+# get_monotonic_boottime(struct timespec *) — the 64-bit-safe timespec64
+# API these files assume simply doesn't exist here. Confirmed by an
+# actual compile error (not a guess this time):
+#   event.c:62: incompatible pointer types passing 'struct timespec64 *'
+#   to parameter of type 'struct timespec *'
+# `-L` matters here for the same reason as everywhere else in this
+# pipeline: $KSU_DIR is reached through a symlink (drivers/kernelsu ->
+# the real clone), and plain `find` refuses to descend into a symlinked
+# directory without it.
+for EVENT_C in $(find -L "$KERNEL_DIR" -type f -path "*/kernelsu*/event.c" 2>/dev/null); do
+  echo "==> Fixing timespec64/boottime compat in $EVENT_C"
+  sed -i 's/struct timespec64/struct timespec/g' "$EVENT_C"
+  sed -i 's/ktime_get_boottime_ts64/get_monotonic_boottime/g' "$EVENT_C"
+done
+
 # --- Hook mode ---------------------------------------------------------
 #
 # REMOVED (for good): an earlier version of this script tried to "force
