@@ -21,6 +21,18 @@ for f in "$@"; do
   source "$f"
   # Top-level `KEY=` assignments in this file, in order, deduplicated.
   mapfile -t KEYS < <(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "$f" | sed 's/=$//' | sort -u)
+
+  # Fail loud, not silent: if a manifest file yields zero KEY=value
+  # matches, something is genuinely wrong with that file (empty,
+  # corrupted, indented differently than expected, wrong line endings,
+  # ...) — continuing quietly here is exactly what let device.env go
+  # missing without a trace last time, surfacing only much later as a
+  # confusing "empty string is not a valid path" from git.
+  if [ "${#KEYS[@]}" -eq 0 ]; then
+    echo "::error::$f matched zero KEY=value lines — refusing to continue silently. Check this file's content (empty file? unexpected indentation? wrong line endings?)."
+    exit 1
+  fi
+
   for key in "${KEYS[@]}"; do
     value="${!key:-}"
     delim="MANIFEST_EOF_$$_${key}"
