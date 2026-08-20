@@ -1,5 +1,5 @@
-name: "Clone + Patch (SUSFS-Fixed)"
-description: "Clones kernel + integrates KSU + SUSFS dengan intelligent conflict resolution"
+name: "Clone + Patch (SUSFS-Fixed v2)"
+description: "Clones kernel + integrates KSU + SUSFS dengan intelligent conflict resolution & header fixes"
 
 inputs:
   ksu_variant:
@@ -77,7 +77,7 @@ runs:
         KSU_VARIANT: ${{ inputs.ksu_variant }}
       run: bash "$GITHUB_WORKSPACE/scripts/patch_ksu.sh"
 
-    - name: Patch susfs4ksu (ENHANCED with auto-recovery)
+    - name: Patch susfs4ksu (ENHANCED with auto-recovery & header fixes)
       if: inputs.susfs == 'true' && inputs.ksu_variant != 'none'
       shell: bash
       env:
@@ -144,7 +144,6 @@ runs:
           
           if [ -n "$(find "$KSU_DIR" -name "*.rej" 2>/dev/null)" ]; then
             echo "::warning::10_enable_susfs_for_ksu.patch had rejects — attempting cleanup..."
-            # Don't fail here, try to salvage
           fi
         fi
         
@@ -173,8 +172,109 @@ runs:
           fi
         fi
         
-        # Add SUSFS defconfig flags
+        # Cleanup SUSFS repo
+        rm -rf "$WORK" /tmp/*_fuzz*.log 2>/dev/null || true
+
+    - name: Verify and Fix SUSFS Headers & Declarations
+      if: inputs.susfs == 'true' && inputs.ksu_variant != 'none'
+      shell: bash
+      run: |
+        cd "${KERNEL_DIR}"
+        
+        echo "==> Verifying and fixing SUSFS headers & function declarations"
+        
+        # 1. Create/verify include/linux/susfs.h
+        if [ ! -f "include/linux/susfs.h" ]; then
+          echo "⚠ include/linux/susfs.h not found, creating minimal header..."
+          
+          mkdir -p include/linux
+          cat > include/linux/susfs.h << 'SUSFS_HEADER'
+        #ifndef _LINUX_SUSFS_H
+        #define _LINUX_SUSFS_H
+        
+        #include <linux/types.h>
+        
+        #ifdef CONFIG_KSU_SUSFS
+        
+        /* SUSFS core functions - Forward declarations */
+        void susfs_sus_ino_for_show_map_vma(ino_t ino, dev_t *dev, ino_t *ino_out);
+        void susfs_sus_mount(struct vfsmount *mnt);
+        int susfs_should_hide_file(const char *pathname);
+        int susfs_should_hide_inode(unsigned long ino);
+        
+        #else
+        
+        /* Stub implementations when SUSFS not enabled */
+        static inline void susfs_sus_ino_for_show_map_vma(ino_t ino, dev_t *dev, ino_t *ino_out) {
+          if (ino_out)
+            *ino_out = ino;
+        }
+        
+        static inline void susfs_sus_mount(struct vfsmount *mnt) { }
+        
+        static inline int susfs_should_hide_file(const char *pathname) {
+          return 0;
+        }
+        
+        static inline int susfs_should_hide_inode(unsigned long ino) {
+          return 0;
+        }
+        
+        #endif /* CONFIG_KSU_SUSFS */
+        
+        #endif /* _LINUX_SUSFS_H */
+        SUSFS_HEADER
+          
+          echo "✓ Created include/linux/susfs.h with function declarations and stubs"
+        else
+          echo "✓ include/linux/susfs.h found"
+        fi
+        
+        # 2. Ensure fs/proc/task_mmu.c has SUSFS include
+        if [ -f "fs/proc/task_mmu.c" ]; then
+          if ! grep -q "#include.*susfs" fs/proc/task_mmu.c; then
+            echo "⚠ fs/proc/task_mmu.c missing SUSFS include, adding..."
+            
+            # Find the line with CONFIG_KSU_SUSFS ifdef and add include
+            if grep -q "CONFIG_KSU_SUSFS" fs/proc/task_mmu.c; then
+              # Add include right after CONFIG_KSU_SUSFS check
+              sed -i '/#ifdef CONFIG_KSU_SUSFS/a #include <linux/susfs.h>' fs/proc/task_mmu.c
+              echo "✓ Added SUSFS include to task_mmu.c (after CONFIG_KSU_SUSFS)"
+            else
+              # Add at top of file after other includes
+              sed -i '1,/^#include/{ /^#include.*\/$/a #include <linux/susfs.h>
+              }' fs/proc/task_mmu.c
+              echo "✓ Added SUSFS include to task_mmu.c (top)"
+            fi
+          else
+            echo "✓ SUSFS include already in fs/proc/task_mmu.c"
+          fi
+        fi
+        
+        # 3. Check for other SUSFS function calls and verify includes
+        echo "==> Checking for other SUSFS function calls..."
+        
+        susfs_funcs=$(grep -r "susfs_sus_" fs/ kernel/ 2>/dev/null | grep -v "\.o:" | cut -d: -f1 | sort -u || true)
+        if [ -n "$susfs_funcs" ]; then
+          echo "Found SUSFS function calls in:"
+          echo "$susfs_funcs" | while read file; do
+            if [ -f "$file" ] && ! grep -q "#include.*susfs" "$file"; then
+              echo "  ⚠ $file uses SUSFS but missing include"
+              # Add include
+              sed -i '1,/^#include/ { /^#include.*linux.*h"$/a #ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#endif
+              }' "$file"
+              echo "    ✓ Added SUSFS include"
+            else
+              echo "  ✓ $file has SUSFS include"
+            fi
+          done
+        fi
+        
+        # 4. Add SUSFS config flags
         DEFCONFIG_PATH="arch/${ARCH}/configs/${DEFCONFIG}"
+        echo "==> Setting SUSFS kernel config options"
+        
+        touch "$DEFCONFIG_PATH"
         for flag in \
           CONFIG_KSU_SUSFS=y \
           CONFIG_KSU_SUSFS_SUS_PATH=y \
@@ -185,14 +285,16 @@ runs:
           CONFIG_KSU_SUSFS_ENABLE_LOG=y \
           CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y \
           CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y \
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y ; do
-          grep -q "^${flag%%=*}=" "$DEFCONFIG_PATH" 2>/dev/null || echo "$flag" >> "$DEFCONFIG_PATH"
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y; do
+          
+          key="${flag%%=*}"
+          if ! grep -q "^${key}=" "$DEFCONFIG_PATH"; then
+            echo "$flag" >> "$DEFCONFIG_PATH"
+            echo "  + $flag"
+          fi
         done
         
-        echo "✓ SUSFS integration complete (may have rejects, but will attempt to compile)"
-        
-        # Cleanup
-        rm -rf "$WORK" /tmp/ksu_fuzz*.log /tmp/kernel_fuzz*.log 2>/dev/null || true
+        echo "✓ SUSFS headers & declarations verified/fixed"
 
     - name: Enable OverlayFS + stage Mountify
       if: inputs.overlayfs_mountify == 'true'
