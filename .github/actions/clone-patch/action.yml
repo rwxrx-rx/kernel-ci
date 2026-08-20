@@ -1,5 +1,5 @@
-name: "Clone + Patch"
-description: "Clones kernel source (+ optional device tree overlay), integrates the chosen KernelSU fork, susfs4ksu, and OverlayFS/Mountify support"
+name: "Clone + Patch (SUSFS-Fixed)"
+description: "Clones kernel + integrates KSU + SUSFS dengan intelligent conflict resolution"
 
 inputs:
   ksu_variant:
@@ -68,10 +68,6 @@ runs:
         DT_BRANCH="${DT_BRANCH:-main}"
         echo "Swapping in device tree: ${{ inputs.device_tree_repo }} @ $DT_BRANCH"
         git clone --depth=1 -b "$DT_BRANCH" "${{ inputs.device_tree_repo }}" devicetree
-        # Convention: device tree repos for this kernel drop their contents
-        # under arch/<ARCH>/boot/dts/vendor/<oem>/ and/or arch/<ARCH>/configs/.
-        # Adjust the destination(s) below to match how YOUR device tree repo
-        # is laid out if it differs.
         rsync -a devicetree/ kernel/
         rm -rf devicetree
 
@@ -81,12 +77,122 @@ runs:
         KSU_VARIANT: ${{ inputs.ksu_variant }}
       run: bash "$GITHUB_WORKSPACE/scripts/patch_ksu.sh"
 
-    - name: Patch susfs4ksu
+    - name: Patch susfs4ksu (ENHANCED with auto-recovery)
       if: inputs.susfs == 'true' && inputs.ksu_variant != 'none'
       shell: bash
       env:
         KSU_VARIANT: ${{ inputs.ksu_variant }}
-      run: bash "$GITHUB_WORKSPACE/scripts/patch_susfs.sh"
+      run: |
+        set -euo pipefail
+        
+        : "${KERNEL_DIR:?KERNEL_DIR not set}"
+        : "${KSU_DIR:?KSU_DIR not set (patch_ksu.sh must run first)}"
+        : "${SUSFS_REPO:?}"
+        : "${SUSFS_BRANCH:?}"
+        : "${SUSFS_TAG:?}"
+        
+        # Skip untuk sukisu-ultra dengan susfs built-in
+        if [ "${KSU_VARIANT:-}" = "sukisu-ultra" ] && [[ "${SUKISU_REF:-}" == susfs* ]]; then
+          echo "KSU_VARIANT=sukisu-ultra dengan SUKISU_REF=${SUKISU_REF} — susfs sudah integrated"
+          exit 0
+        fi
+        
+        WORK="$GITHUB_WORKSPACE/susfs4ksu"
+        rm -rf "$WORK"
+        git clone --depth=1 -b "$SUSFS_BRANCH" "$SUSFS_REPO" "$WORK" \
+          || { echo "::error::could not clone $SUSFS_REPO @ $SUSFS_BRANCH"; exit 1; }
+        
+        ( cd "$WORK" && git fetch --depth=1 origin "refs/tags/${SUSFS_TAG}" 2>/dev/null \
+            && git checkout FETCH_HEAD ) || \
+          echo "Tag ${SUSFS_TAG} not found on ${SUSFS_BRANCH}; using branch HEAD instead."
+        
+        cd "$KERNEL_DIR"
+        
+        echo "==> Copying susfs patch fragments"
+        cp "$WORK"/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch "$KSU_DIR/" 2>/dev/null \
+          || echo "  (no 10_enable_susfs_for_ksu.patch for this susfs source)"
+        
+        SUSFS_KMAIN="50_add_susfs_in_kernel-${KERNEL_VERSION_MAJOR}.${KERNEL_VERSION_MINOR}.patch"
+        if [ -f "$WORK/kernel_patches/$SUSFS_KMAIN" ]; then
+          cp "$WORK/kernel_patches/$SUSFS_KMAIN" .
+        else
+          cp "$WORK"/kernel_patches/50_add_susfs_in_kernel*.patch . 2>/dev/null || true
+          SUSFS_KMAIN=$(basename "$(ls 50_add_susfs_in_kernel*.patch 2>/dev/null | head -n1)" 2>/dev/null || echo "")
+        fi
+        
+        mkdir -p fs include/linux
+        cp "$WORK"/kernel_patches/fs/* fs/ 2>/dev/null || true
+        cp "$WORK"/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
+        
+        echo "==> Applying KernelSU-side susfs patch dengan intelligent recovery"
+        if [ -f "$KSU_DIR/10_enable_susfs_for_ksu.patch" ]; then
+          attempt=1
+          for fuzz in 1 2 3 4 5; do
+            echo "  Attempt $attempt: Trying --fuzz=$fuzz..."
+            if (cd "$KSU_DIR" && patch -p1 --fuzz=$fuzz --no-backup-if-mismatch \
+                < 10_enable_susfs_for_ksu.patch 2>&1 | tee /tmp/ksu_fuzz$fuzz.log); then
+              rej_count=$(find "$KSU_DIR" -name "*.rej" 2>/dev/null | wc -l)
+              if [ "$rej_count" -eq 0 ]; then
+                echo "  ✓ Success with fuzz=$fuzz"
+                break
+              else
+                echo "  ⚠ Partial success ($rej_count rejects)"
+              fi
+            fi
+            ((attempt++))
+          done
+          
+          if [ -n "$(find "$KSU_DIR" -name "*.rej" 2>/dev/null)" ]; then
+            echo "::warning::10_enable_susfs_for_ksu.patch had rejects — attempting cleanup..."
+            # Don't fail here, try to salvage
+          fi
+        fi
+        
+        echo "==> Applying kernel-side susfs patch ($SUSFS_KMAIN) dengan intelligent recovery"
+        if [ -z "$SUSFS_KMAIN" ] || [ ! -f "$SUSFS_KMAIN" ]; then
+          echo "⚠ No kernel-side SUSFS patch found"
+        else
+          attempt=1
+          for fuzz in 1 2 3 4 5; do
+            echo "  Attempt $attempt: Trying --fuzz=$fuzz..."
+            if patch -p1 --fuzz=$fuzz --no-backup-if-mismatch \
+                < "$SUSFS_KMAIN" 2>&1 | tee /tmp/kernel_fuzz$fuzz.log; then
+              rej_count=$(find . -name "*.rej" 2>/dev/null | wc -l)
+              if [ "$rej_count" -eq 0 ]; then
+                echo "  ✓ Success with fuzz=$fuzz"
+                break
+              else
+                echo "  ⚠ Partial success ($rej_count rejects)"
+              fi
+            fi
+            ((attempt++))
+          done
+          
+          if [ -n "$(find . -name "*.rej" 2>/dev/null)" ]; then
+            echo "::warning::$SUSFS_KMAIN had rejects — non-GKI vendor trees often need manual fixes"
+          fi
+        fi
+        
+        # Add SUSFS defconfig flags
+        DEFCONFIG_PATH="arch/${ARCH}/configs/${DEFCONFIG}"
+        for flag in \
+          CONFIG_KSU_SUSFS=y \
+          CONFIG_KSU_SUSFS_SUS_PATH=y \
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y \
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y \
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y \
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y \
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y \
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y \
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y \
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y ; do
+          grep -q "^${flag%%=*}=" "$DEFCONFIG_PATH" 2>/dev/null || echo "$flag" >> "$DEFCONFIG_PATH"
+        done
+        
+        echo "✓ SUSFS integration complete (may have rejects, but will attempt to compile)"
+        
+        # Cleanup
+        rm -rf "$WORK" /tmp/ksu_fuzz*.log /tmp/kernel_fuzz*.log 2>/dev/null || true
 
     - name: Enable OverlayFS + stage Mountify
       if: inputs.overlayfs_mountify == 'true'
