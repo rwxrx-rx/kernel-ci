@@ -1,4 +1,4 @@
-name: "Clone + Patch "
+name: "Clone Patch SUSFS "
 description: "Clones kernel + integrates KSU + SUSFS dengan intelligent conflict resolution & header fixes"
 
 inputs:
@@ -230,6 +230,16 @@ runs:
           echo "✓ include/linux/susfs.h found"
         fi
         
+        # 1.5 FIX: Forward declare struct kstat untuk mencegah error visibility/conflicting types
+        if [ -f "include/linux/susfs.h" ]; then
+          if ! grep -q "struct kstat;" include/linux/susfs.h; then
+            echo "⚠ Fixing struct kstat visibility in susfs.h..."
+            # Menyisipkan 'struct kstat;' tepat di atas baris '#include' pertama
+            sed -i '0,/#include/s@^#include.*@struct kstat;\n&@' include/linux/susfs.h
+            echo "✓ Added struct kstat forward declaration to susfs.h"
+          fi
+        fi
+
         # 2. Ensure fs/proc/task_mmu.c has SUSFS include safely
         if [ -f "fs/proc/task_mmu.c" ]; then
           if ! grep -q "linux/susfs.h" fs/proc/task_mmu.c; then
