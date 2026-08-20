@@ -44,9 +44,9 @@ runs:
           # [0x13] section .relr.dyn" / "skipping incompatible libc.so.6"
           # — which is what was actually breaking vdso/genheaders/etc in
           # both the vanilla and KSU builds (this was never KSU-specific).
-          HOSTCC=/usr/bin/gcc
-          HOSTCXX=/usr/bin/g++
-          HOSTLD=/usr/bin/ld
+          HOSTCC="/usr/bin/gcc -B/usr/bin/"
+          HOSTCXX="/usr/bin/g++ -B/usr/bin/"
+          HOSTLDFLAGS="-B/usr/bin/"
         )
 
         make "${MAKE_ARGS[@]}" "$DEFCONFIG"
