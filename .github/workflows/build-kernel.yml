@@ -11,7 +11,7 @@ on:
       component:
         description: "Which component(s) to build"
         type: choice
-        default: kernel
+        default: both 
         options: [kernel, manager, both]
       ksu_variant:
         description: "KernelSU fork (used when build_target includes ksu)"
@@ -39,23 +39,23 @@ on:
       feature_wireguard:
         description: "[Feature] WireGuard"
         type: boolean
-        default: false
+        default: true
       feature_baseband_guard:
         description: "[Feature] Baseband-guard (BBG)"
         type: boolean
-        default: false
+        default: true
       feature_thinlto_o3:
         description: "[Feature] ThinLTO + -O3"
         type: boolean
-        default: false
+        default: true 
       feature_zram_zstd:
         description: "[Feature] ZRAM + zstd"
         type: boolean
-        default: false
+        default: true 
       feature_tcp_bbr:
         description: "[Feature] TCP BBR (mutually exclusive with Westwood)"
         type: boolean
-        default: false
+        default: true
       feature_tcp_westwood:
         description: "[Feature] TCP Westwood (mutually exclusive with BBR)"
         type: boolean
@@ -63,15 +63,15 @@ on:
       feature_ttl_spoof:
         description: "[Feature] TTL/Hop-Limit spoof (sysctl, see manifest/features.env)"
         type: boolean
-        default: false
+        default: true
       feature_droidspace:
         description: "[Feature] DroidSpace kernel prerequisites (namespaces/cgroups)"
         type: boolean
-        default: false
+        default: true
       feature_f2fs_opt:
         description: "[Feature] F2FS optimizations (compression, xattr/ACL)"
         type: boolean
-        default: false
+        default: true
       device_tree_repo:
         description: "Override device tree repo (blank = use manifest default)"
         type: string
