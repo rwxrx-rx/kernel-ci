@@ -1,5 +1,5 @@
-name: "Clone Patch SUSFS "
-description: "Clones kernel + integrates KSU + SUSFS dengan intelligent conflict resolution & header fixes"
+name: "Clone Patch SUSFS"
+description: "Clones kernel + integrates KSU + SUSFS with intelligent conflict resolution & header fixes"
 
 inputs:
   ksu_variant:
@@ -91,9 +91,9 @@ runs:
         : "${SUSFS_BRANCH:?}"
         : "${SUSFS_TAG:?}"
         
-        # Skip untuk sukisu-ultra dengan susfs built-in
+        # Skip for sukisu-ultra with built-in susfs
         if [ "${KSU_VARIANT:-}" = "sukisu-ultra" ] && [[ "${SUKISU_REF:-}" == susfs* ]]; then
-          echo "KSU_VARIANT=sukisu-ultra dengan SUKISU_REF=${SUKISU_REF} — susfs sudah integrated"
+          echo "KSU_VARIANT=sukisu-ultra with SUKISU_REF=${SUKISU_REF} — susfs is already integrated"
           exit 0
         fi
         
@@ -124,10 +124,10 @@ runs:
         cp "$WORK"/kernel_patches/fs/* fs/ 2>/dev/null || true
         cp "$WORK"/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
         
-        echo "==> Applying KernelSU-side susfs patch dengan intelligent recovery"
+        echo "==> Applying KernelSU-side susfs patch with intelligent recovery"
         if [ -f "$KSU_DIR/10_enable_susfs_for_ksu.patch" ]; then
           attempt=1
-          for fuzz in 1 2 3 4 5; do
+          for fuzz in 1 2; do
             echo "  Attempt $attempt: Trying --fuzz=$fuzz..."
             if (cd "$KSU_DIR" && patch -p1 --fuzz=$fuzz --no-backup-if-mismatch \
                 < 10_enable_susfs_for_ksu.patch 2>&1 | tee /tmp/ksu_fuzz$fuzz.log); then
@@ -147,12 +147,12 @@ runs:
           fi
         fi
         
-        echo "==> Applying kernel-side susfs patch ($SUSFS_KMAIN) dengan intelligent recovery"
+        echo "==> Applying kernel-side susfs patch ($SUSFS_KMAIN) with intelligent recovery"
         if [ -z "$SUSFS_KMAIN" ] || [ ! -f "$SUSFS_KMAIN" ]; then
           echo "⚠ No kernel-side SUSFS patch found"
         else
           attempt=1
-          for fuzz in 1 2 3 4 5; do
+          for fuzz in 1 2; do
             echo "  Attempt $attempt: Trying --fuzz=$fuzz..."
             if patch -p1 --fuzz=$fuzz --no-backup-if-mismatch \
                 < "$SUSFS_KMAIN" 2>&1 | tee /tmp/kernel_fuzz$fuzz.log; then
@@ -230,11 +230,11 @@ runs:
           echo "✓ include/linux/susfs.h found"
         fi
         
-        # 1.5 FIX: Forward declare struct kstat untuk mencegah error visibility/conflicting types
+        # 1.5 FIX: Forward declare struct kstat to prevent visibility/conflicting types error
         if [ -f "include/linux/susfs.h" ]; then
           if ! grep -q "struct kstat;" include/linux/susfs.h; then
             echo "⚠ Fixing struct kstat visibility in susfs.h..."
-            # Menyisipkan 'struct kstat;' tepat di atas baris '#include' pertama
+            # Inserting 'struct kstat;' right above the first '#include' line
             sed -i '0,/#include/s@^#include.*@struct kstat;\n&@' include/linux/susfs.h
             echo "✓ Added struct kstat forward declaration to susfs.h"
           fi
@@ -244,7 +244,7 @@ runs:
         if [ -f "fs/proc/task_mmu.c" ]; then
           if ! grep -q "linux/susfs.h" fs/proc/task_mmu.c; then
             echo "⚠ fs/proc/task_mmu.c missing SUSFS include, forcing injection..."
-            # FIXED: Menggunakan '@' sebagai delimiter agar '/' tidak bentrok
+            # FIXED: Using '@' as a delimiter to prevent '/' conflicts
             sed -i '0,/#include/s@^#include.*@#include <linux/susfs.h>\n&@' fs/proc/task_mmu.c
             echo "✓ Added SUSFS include to task_mmu.c"
           else
@@ -261,7 +261,7 @@ runs:
           echo "$susfs_funcs" | while read file; do
             if [ -f "$file" ] && ! grep -q "linux/susfs.h" "$file"; then
               echo "  ⚠ $file uses SUSFS but missing include"
-              # FIXED: Menggunakan '@' sebagai delimiter di sini juga
+              # FIXED: Using '@' as a delimiter here as well
               sed -i '0,/#include/s@^#include.*@#include <linux/susfs.h>\n&@' "$file"
               echo "    ✓ Added SUSFS include"
             else
@@ -295,7 +295,6 @@ runs:
         done
         
         echo "✓ SUSFS headers & declarations verified/fixed"
-
 
     - name: Enable OverlayFS + stage Mountify
       if: inputs.overlayfs_mountify == 'true'
