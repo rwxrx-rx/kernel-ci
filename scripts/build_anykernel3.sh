@@ -159,4 +159,7 @@ ZIP_NAME="${KERNEL_NAME}-${CODENAME}-${SUFFIX}-${DATE_TAG}.zip"
 echo "path=$GITHUB_WORKSPACE/$ZIP_NAME" >> "$GITHUB_OUTPUT"
 echo "name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 echo "Packaged: $ZIP_NAME"
-[ "$RESUKISU_BOOTSTRAP_STAGED" = "true" ] && echo "  (includes ReSukiSU userspace bootstrap payload)"
+if [ "$RESUKISU_BOOTSTRAP_STAGED" = "true" ]; then
+  echo "  (includes ReSukiSU userspace bootstrap payload)"
+fi
+exit 0
