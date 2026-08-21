@@ -61,31 +61,20 @@ if [ "${FEATURE_WIREGUARD:-false}" = "true" ]; then
   grep -q '"net/wireguard/Kconfig"' "$KERNEL_DIR/net/Kconfig" 2>/dev/null \
     || sed -i '/endmenu/i source "net/wireguard/Kconfig"' "$KERNEL_DIR/net/Kconfig"
   
-  WG_COMPAT="$KERNEL_DIR/net/wireguard/compat/compat.h"
-  if [ -f "$WG_COMPAT" ]; then
-      python3 -c '
-path = "'"$WG_COMPAT"'"
-with open(path, "r") as f: text = f.read()
-
-target = "struct __kernel_timespec {"
-if target in text and "#ifndef __kernel_timespec" not in text:
-    idx = text.find(target)
-    brace = 0; end_idx = idx; started = False
-    for i in range(idx, len(text)):
-        if text[i] == "{": brace += 1; started = True
-        elif text[i] == "}": brace -= 1
-        if started and brace == 0: end_idx = i + 1; break
-    block = text[idx:end_idx]
-    text = text.replace(block, f"#ifndef __kernel_timespec\n{block}\n#endif")
-
-text = text.replace("static __always_inline void old_synchronize_rcu(void)", "static __always_inline void wg_old_synchronize_rcu(void)")
-text = text.replace("old_synchronize_rcu()", "wg_old_synchronize_rcu()")
-
-with open(path, "w") as f: f.write(text)
-'
-      sed -i 's/struct timespec {/struct timespec_wg_unused {/g' "$WG_COMPAT"
-      sed -i 's/struct timespec64 {/struct timespec64_wg_unused {/g' "$WG_COMPAT"
-  fi
+  # REMOVED: this used to try "fixing" net/wireguard/compat/compat.h
+  # with a homemade #ifndef guard around `struct __kernel_timespec`
+  # plus blind renames of `struct timespec`/`timespec64`. That guard
+  # was broken on its own terms — `__kernel_timespec` is a struct name,
+  # not a preprocessor macro, so `#ifndef __kernel_timespec` never
+  # actually evaluated true and never prevented the redefinition it was
+  # meant to guard against. It also fought against
+  # wireguard-linux-compat's OWN upstream `#if LINUX_VERSION_CODE < ...`
+  # guards, which already exist specifically to handle exactly this
+  # "does this kernel already have struct X" problem correctly across
+  # many kernel versions. Deleting the homemade patch entirely rather
+  # than trying to make it "more correct" — if a real conflict remains
+  # without it, that's the moment to add a narrow, evidence-based fix
+  # instead of another guess.
 
   append_defconfig "${WIREGUARD_DEFCONFIG:-CONFIG_WIREGUARD=y}"
 fi

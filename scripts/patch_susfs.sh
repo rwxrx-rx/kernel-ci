@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 # scripts/patch_susfs.sh
-# Enhanced version of patch_susfs.sh dengan auto-recovery untuk conflicts
-# Supports kernel 4.14 dengan custom branch (lineage-23.2-fts-fixed)
-
+# Fallback susfs4ksu install for forks WITHOUT a proven tree-overlay
+# (i.e. everything except ReSukiSU — see
+# scripts/resukisu_helpers/patch_susfs_resukisu.sh for that one).
+#
+# Attempts the generic susfs4ksu unified-diff patch with increasing
+# --fuzz. If it applies with real rejects, this does NOT set
+# CONFIG_KSU_SUSFS=y anyway and call it done — a kernel that reports
+# susfs as enabled while missing large parts of the actual patch isn't
+# protected, it's just quiet about not being protected. On rejects, the
+# SUSFS config flags are explicitly unset and the failure is visible in
+# the log, so you know to either fix the anchors for this fork's tree or
+# build without susfs for it — not find out from a device that's easier
+# to detect root on than expected.
 set -euo pipefail
 
 : "${KERNEL_DIR:?KERNEL_DIR not set}"
@@ -10,19 +20,21 @@ set -euo pipefail
 : "${SUSFS_REPO:?}"
 : "${SUSFS_BRANCH:?}"
 : "${SUSFS_TAG:?}"
+: "${ARCH:?}"
+: "${DEFCONFIG:?}"
 
-# Skip untuk sukisu-ultra yang sudah include susfs
-if [ "${KSU_VARIANT:-}" = "sukisu-ultra" ] && [[ "${SUKISU_REF:-}" == susfs* ]]; then
-  echo "KSU_VARIANT=sukisu-ultra dengan SUKISU_REF=${SUKISU_REF} — susfs sudah integrated, skip."
-  exit 0
-fi
+DEFCONFIG_PATH="arch/${ARCH}/configs/${DEFCONFIG}"
+
+unset_susfs_config() {
+  echo "::warning::susfs4ksu did not apply cleanly for KSU_VARIANT=${KSU_VARIANT:-unknown} — building WITHOUT susfs rather than reporting it as enabled while broken. CONFIG_KSU_SUSFS* left unset."
+  sed -i '/^CONFIG_KSU_SUSFS/d' "$DEFCONFIG_PATH" 2>/dev/null || true
+}
 
 WORK="$GITHUB_WORKSPACE/susfs4ksu"
 rm -rf "$WORK"
 git clone --depth=1 -b "$SUSFS_BRANCH" "$SUSFS_REPO" "$WORK" \
   || { echo "::error::could not clone $SUSFS_REPO @ $SUSFS_BRANCH"; exit 1; }
 
-# Try pin ke tag, fallback ke branch HEAD
 ( cd "$WORK" && git fetch --depth=1 origin "refs/tags/${SUSFS_TAG}" 2>/dev/null \
     && git checkout FETCH_HEAD ) || \
   echo "Tag ${SUSFS_TAG} not found on ${SUSFS_BRANCH}; using branch HEAD."
@@ -31,109 +43,48 @@ cd "$KERNEL_DIR"
 
 echo "==> Copying susfs patch fragments"
 cp "$WORK"/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch "$KSU_DIR/" 2>/dev/null \
-  || echo "  (no 10_enable_susfs_for_ksu.patch found)"
+  || echo "  (no 10_enable_susfs_for_ksu.patch for this susfs source)"
 
 SUSFS_KMAIN="50_add_susfs_in_kernel-${KERNEL_VERSION_MAJOR}.${KERNEL_VERSION_MINOR}.patch"
 if [ -f "$WORK/kernel_patches/$SUSFS_KMAIN" ]; then
   cp "$WORK/kernel_patches/$SUSFS_KMAIN" .
 else
   cp "$WORK"/kernel_patches/50_add_susfs_in_kernel*.patch . 2>/dev/null || true
-  SUSFS_KMAIN=$(basename "$(ls 50_add_susfs_in_kernel*.patch 2>/dev/null | head -n1)" 2>/dev/null || echo "50_add_susfs_in_kernel.patch")
+  SUSFS_KMAIN=$(basename "$(ls 50_add_susfs_in_kernel*.patch 2>/dev/null | head -n1)" 2>/dev/null || echo "")
 fi
 
 mkdir -p fs include/linux
 cp "$WORK"/kernel_patches/fs/* fs/ 2>/dev/null || true
 cp "$WORK"/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
 
-echo "==> Applying KernelSU-side susfs patch dengan fuzzy matching"
+TOTAL_REJECTS=0
+
+echo "==> Applying KernelSU-side susfs patch"
 if [ -f "$KSU_DIR/10_enable_susfs_for_ksu.patch" ]; then
-  ( cd "$KSU_DIR" && patch -p1 --fuzz=4 < 10_enable_susfs_for_ksu.patch ) 2>&1 | tee /tmp/ksu_patch.log \
-    || {
-      echo "::warning::10_enable_susfs_for_ksu.patch had conflicts, attempting recovery..."
-      # Collect reject files
-      REJ_FILES=$(find "$KSU_DIR" -name "*.rej" 2>/dev/null || true)
-      if [ -n "$REJ_FILES" ]; then
-        echo "Reject files found:"
-        echo "$REJ_FILES"
-        # Try apply dengan fuzz lebih tinggi
-        echo "Retrying dengan --fuzz=5..."
-        cd "$KSU_DIR"
-        for rej in *.rej; do
-          orig_file="${rej%.rej}"
-          if [ -f "$orig_file" ]; then
-            echo "  Attempting to salvage $orig_file..."
-            # Skip hunks yang gagal, keep yang berhasil
-            grep -v "^>" "$rej" > "$rej.fixed" || true
-          fi
-        done
-        cd - > /dev/null
-      fi
-    }
+  ( cd "$KSU_DIR" && patch -p1 --fuzz=3 < 10_enable_susfs_for_ksu.patch ) \
+    || echo "::warning::10_enable_susfs_for_ksu.patch had rejects — check ${KSU_DIR}/*.rej"
+  REJ=$(find "$KSU_DIR" -name '*.rej' 2>/dev/null | wc -l)
+  TOTAL_REJECTS=$((TOTAL_REJECTS + REJ))
 fi
 
-echo "==> Applying kernel-side susfs patch ($SUSFS_KMAIN) dengan fuzzy matching"
-
-# Function untuk smart patch aplikasi
-apply_smart_patch() {
-  local patch_file=$1
-  local max_fuzz=5
-  local fuzz_level=1
-  
-  while [ $fuzz_level -le $max_fuzz ]; do
-    echo "  Trying --fuzz=$fuzz_level..."
-    
-    # Try dry-run first
-    if patch -p1 --dry-run --fuzz=$fuzz_level < "$patch_file" > /dev/null 2>&1; then
-      echo "  ✓ Dry-run OK with fuzz=$fuzz_level, applying..."
-      patch -p1 --fuzz=$fuzz_level < "$patch_file" 2>&1 | tee /tmp/kernel_patch.log
-      
-      # Check jika ada reject files
-      REJ_COUNT=$(find . -name "*.rej" 2>/dev/null | wc -l)
-      if [ "$REJ_COUNT" -eq 0 ]; then
-        echo "  ✓ No rejects, patch applied successfully!"
-        return 0
-      else
-        echo "  ⚠ $REJ_COUNT reject files found, but some hunks applied"
-        return 1
-      fi
-    fi
-    
-    ((fuzz_level++))
-  done
-  
-  echo "  ✗ Failed dengan semua fuzz levels. Attempting partial application..."
-  return 1
-}
-
-apply_smart_patch "$SUSFS_KMAIN" || {
-  echo "::warning::$SUSFS_KMAIN had rejects. Attempting partial patch application..."
-  
-  # Extract hunks yang bisa di-apply
-  patch -p1 --fuzz=4 < "$SUSFS_KMAIN" 2>&1 | tee /tmp/kernel_patch_full.log || true
-  
-  # List reject files
-  find . -name "*.rej" -type f 2>/dev/null | while read rej_file; do
-    echo "::warning::Reject file: $rej_file"
-    echo "  Content:"
-    head -20 "$rej_file" | sed 's/^/    /'
-  done
-}
-
-# Post-patch fixup untuk known issue dengan kernel 4.14 lineage
-echo "==> Applying post-patch fixups untuk kernel 4.14..."
-
-# Ensure flask.h is correctly referenced
-if [ -f "security/selinux/include/flask.h" ]; then
-  echo "  ✓ flask.h found, SELinux headers OK"
+if [ -n "$SUSFS_KMAIN" ] && [ -f "$SUSFS_KMAIN" ]; then
+  echo "==> Applying kernel-side susfs patch ($SUSFS_KMAIN)"
+  patch -p1 --fuzz=3 < "$SUSFS_KMAIN" \
+    || echo "::warning::$SUSFS_KMAIN had rejects — check *.rej files"
+  REJ=$(find . -maxdepth 3 -name '*.rej' 2>/dev/null | wc -l)
+  TOTAL_REJECTS=$((TOTAL_REJECTS + REJ))
 else
-  echo "  ⚠ flask.h not found, checking alternative paths..."
-  find . -name "flask.h" -type f 2>/dev/null | head -5
+  echo "::warning::no kernel-side susfs patch found for kernel ${KERNEL_VERSION_MAJOR}.${KERNEL_VERSION_MINOR} in this susfs4ksu source"
+  TOTAL_REJECTS=$((TOTAL_REJECTS + 1))
 fi
 
-# Ensure SUSFS config flags added
-DEFCONFIG_PATH="arch/${ARCH}/configs/${DEFCONFIG}"
-echo "==> Adding SUSFS config flags to $DEFCONFIG"
+if [ "$TOTAL_REJECTS" -gt 0 ]; then
+  echo "::warning::$TOTAL_REJECTS reject file(s) total across both patches."
+  unset_susfs_config
+  exit 0
+fi
 
+echo "==> susfs4ksu applied cleanly, enabling config"
 for flag in \
   CONFIG_KSU_SUSFS=y \
   CONFIG_KSU_SUSFS_SUS_PATH=y \
@@ -145,36 +96,9 @@ for flag in \
   CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y \
   CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y \
   CONFIG_KSU_SUSFS_OPEN_REDIRECT=y ; do
-  if ! grep -q "^${flag%%=*}=" "$DEFCONFIG_PATH" 2>/dev/null; then
-    echo "  + Adding $flag"
-    echo "$flag" >> "$DEFCONFIG_PATH"
-  fi
+  key="${flag%%=*}"
+  grep -q "^${key}=" "$DEFCONFIG_PATH" 2>/dev/null && sed -i "/^${key}=/d" "$DEFCONFIG_PATH"
+  echo "$flag" >> "$DEFCONFIG_PATH"
 done
 
-# Verify critical files exist
-echo "==> Verifying critical SUSFS files..."
-critical_ok=true
-
-check_file() {
-  if [ -f "$1" ]; then
-    echo "  ✓ $1 OK"
-    return 0
-  else
-    echo "  ✗ $1 MISSING!"
-    critical_ok=false
-    return 1
-  fi
-}
-
-check_file "fs/susfs_copy_file_range.c" || true
-check_file "fs/open.c" || true
-check_file "include/linux/susfs.h" || true
-
-if [ "$critical_ok" = true ]; then
-  echo "✅ SUSFS integration complete!"
-  exit 0
-else
-  echo "⚠ Some files missing, but build may still work"
-  echo "Review *.rej files if build fails"
-  exit 0  # Don't fail here, let compilation try
-fi
+echo "susfs4ksu integration finished cleanly for KSU_VARIANT=${KSU_VARIANT:-unknown}."

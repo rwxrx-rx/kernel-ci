@@ -28,14 +28,17 @@ jobs:
           esac
           echo "repo=$REPO" >> "$GITHUB_OUTPUT"
 
-      # NOTE on "one universal manager APK": every KSU fork ships its own
-      # manager because the manager talks to the kernel driver over a
-      # fork-specific ioctl/prctl contract — there isn't a single upstream
-      # APK that's actually compatible with all forks at once. What this
-      # job gives you instead is "one workflow that builds the right
-      # manager for whichever fork you picked", which is the practical
-      # version of that same convenience. If a specific fork later ships
-      # a truly cross-compatible manager, just point REPO at it above.
+      # NOTE on ReSukiSU specifically: ReSukiSU does not publish GitHub
+      # Releases at all (confirmed on their own releases page — "There
+      # aren't any releases here" — and their install docs say to grab
+      # the Manager via nightly.link or a GitHub Actions artifact
+      # instead). Their own manager is also a non-trivial multi-module
+      # Compose/Koin app. That means a plain `./gradlew assembleRelease`
+      # here is a genuine best-effort, not a guaranteed build — if it
+      # fails for resukisu specifically, that's the expected/documented
+      # state of that project right now, not a bug in this workflow to
+      # keep chasing. The other forks (KernelSU-Next, SukiSU Ultra,
+      # WildKSU) ship simpler managers that build via plain Gradle fine.
       - name: Clone manager source
         if: steps.resolve.outputs.repo != ''
         run: git clone --depth=1 --recurse-submodules "${{ steps.resolve.outputs.repo }}" manager-src
@@ -63,13 +66,48 @@ jobs:
           echo "Found gradle project at $GRADLE_DIR"
           cd "$GRADLE_DIR"
           chmod +x gradlew
-          ./gradlew :manager:assembleRelease || ./gradlew assembleRelease
+
+          # Try likely release task names first. `assembleRelease` on
+          # most of these apps needs a signing config this CI doesn't
+          # have — that's the single most common reason this step fails,
+          # not a wrong task name — so after exhausting release
+          # variants, fall back to assembleDebug (unsigned-but-installable,
+          # good enough to test a build actually compiles).
+          BUILD_OK=0
+          for TASK in ":manager:assembleRelease" ":app:assembleRelease" "assembleRelease"; do
+            echo "==> Trying ./gradlew $TASK"
+            if ./gradlew "$TASK" --stacktrace; then
+              BUILD_OK=1
+              break
+            fi
+            echo "    $TASK failed, trying next..."
+          done
+
+          if [ "$BUILD_OK" = "0" ]; then
+            echo "::warning::All assembleRelease variants failed (most likely: no signing config available in CI). Falling back to assembleDebug."
+            for TASK in ":manager:assembleDebug" ":app:assembleDebug" "assembleDebug"; do
+              echo "==> Trying ./gradlew $TASK"
+              if ./gradlew "$TASK" --stacktrace; then
+                BUILD_OK=1
+                break
+              fi
+              echo "    $TASK failed, trying next..."
+            done
+          fi
+
+          if [ "$BUILD_OK" = "0" ]; then
+            echo "::error::Every release and debug assemble task failed for ${{ inputs.ksu_variant }}. This fork's manager likely needs project-specific setup (local.properties, a specific NDK/AGP version, submodules this checkout didn't pull, ...) beyond a bare 'git clone && gradlew build'. Check the -- stacktrace output above for the actual Gradle error."
+            exit 1
+          fi
 
       - name: Collect APK
         if: steps.resolve.outputs.repo != ''
         run: |
           mkdir -p manager-out
-          find manager-src -name '*.apk' -path '*release*' -exec cp {} manager-out/ \;
+          # Release APKs preferred, but a debug fallback from the step
+          # above is still worth keeping — collect both.
+          find manager-src -name '*.apk' \( -path '*release*' -o -path '*debug*' \) -exec cp {} manager-out/ \;
+          ls -la manager-out/ || true
 
       - uses: actions/upload-artifact@v4
         if: steps.resolve.outputs.repo != ''

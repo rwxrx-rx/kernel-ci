@@ -77,235 +77,48 @@ runs:
         KSU_VARIANT: ${{ inputs.ksu_variant }}
       run: bash "$GITHUB_WORKSPACE/scripts/patch_ksu.sh"
 
-    - name: Patch susfs4ksu (ENHANCED with auto-recovery & header fixes)
+    - name: Patch susfs4ksu
       if: inputs.susfs == 'true' && inputs.ksu_variant != 'none'
       shell: bash
       env:
         KSU_VARIANT: ${{ inputs.ksu_variant }}
       run: |
         set -euo pipefail
-        
         : "${KERNEL_DIR:?KERNEL_DIR not set}"
         : "${KSU_DIR:?KSU_DIR not set (patch_ksu.sh must run first)}"
-        : "${SUSFS_REPO:?}"
-        : "${SUSFS_BRANCH:?}"
-        : "${SUSFS_TAG:?}"
-        
-        # Skip for sukisu-ultra with built-in susfs
-        if [ "${KSU_VARIANT:-}" = "sukisu-ultra" ] && [[ "${SUKISU_REF:-}" == susfs* ]]; then
-          echo "KSU_VARIANT=sukisu-ultra with SUKISU_REF=${SUKISU_REF} — susfs is already integrated"
-          exit 0
-        fi
-        
-        WORK="$GITHUB_WORKSPACE/susfs4ksu"
-        rm -rf "$WORK"
-        git clone --depth=1 -b "$SUSFS_BRANCH" "$SUSFS_REPO" "$WORK" \
-          || { echo "::error::could not clone $SUSFS_REPO @ $SUSFS_BRANCH"; exit 1; }
-        
-        ( cd "$WORK" && git fetch --depth=1 origin "refs/tags/${SUSFS_TAG}" 2>/dev/null \
-            && git checkout FETCH_HEAD ) || \
-          echo "Tag ${SUSFS_TAG} not found on ${SUSFS_BRANCH}; using branch HEAD instead."
-        
-        cd "$KERNEL_DIR"
-        
-        echo "==> Copying susfs patch fragments"
-        cp "$WORK"/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch "$KSU_DIR/" 2>/dev/null \
-          || echo "  (no 10_enable_susfs_for_ksu.patch for this susfs source)"
-        
-        SUSFS_KMAIN="50_add_susfs_in_kernel-${KERNEL_VERSION_MAJOR}.${KERNEL_VERSION_MINOR}.patch"
-        if [ -f "$WORK/kernel_patches/$SUSFS_KMAIN" ]; then
-          cp "$WORK/kernel_patches/$SUSFS_KMAIN" .
-        else
-          cp "$WORK"/kernel_patches/50_add_susfs_in_kernel*.patch . 2>/dev/null || true
-          SUSFS_KMAIN=$(basename "$(ls 50_add_susfs_in_kernel*.patch 2>/dev/null | head -n1)" 2>/dev/null || echo "")
-        fi
-        
-        mkdir -p fs include/linux
-        cp "$WORK"/kernel_patches/fs/* fs/ 2>/dev/null || true
-        cp "$WORK"/kernel_patches/include/linux/* include/linux/ 2>/dev/null || true
-        
-        echo "==> Applying KernelSU-side susfs patch with intelligent recovery"
-        if [ -f "$KSU_DIR/10_enable_susfs_for_ksu.patch" ]; then
-          attempt=1
-          for fuzz in 1 2; do
-            echo "  Attempt $attempt: Trying --fuzz=$fuzz..."
-            if (cd "$KSU_DIR" && patch -p1 --fuzz=$fuzz --no-backup-if-mismatch \
-                < 10_enable_susfs_for_ksu.patch 2>&1 | tee /tmp/ksu_fuzz$fuzz.log); then
-              rej_count=$(find "$KSU_DIR" -name "*.rej" 2>/dev/null | wc -l)
-              if [ "$rej_count" -eq 0 ]; then
-                echo "  ✓ Success with fuzz=$fuzz"
-                break
-              else
-                echo "  ⚠ Partial success ($rej_count rejects)"
-              fi
-            fi
-            ((attempt++))
-          done
-          
-          if [ -n "$(find "$KSU_DIR" -name "*.rej" 2>/dev/null)" ]; then
-            echo "::warning::10_enable_susfs_for_ksu.patch had rejects — attempting cleanup..."
-          fi
-        fi
-        
-        echo "==> Applying kernel-side susfs patch ($SUSFS_KMAIN) with intelligent recovery"
-        if [ -z "$SUSFS_KMAIN" ] || [ ! -f "$SUSFS_KMAIN" ]; then
-          echo "⚠ No kernel-side SUSFS patch found"
-        else
-          attempt=1
-          for fuzz in 1 2; do
-            echo "  Attempt $attempt: Trying --fuzz=$fuzz..."
-            if patch -p1 --fuzz=$fuzz --no-backup-if-mismatch \
-                < "$SUSFS_KMAIN" 2>&1 | tee /tmp/kernel_fuzz$fuzz.log; then
-              rej_count=$(find . -name "*.rej" 2>/dev/null | wc -l)
-              if [ "$rej_count" -eq 0 ]; then
-                echo "  ✓ Success with fuzz=$fuzz"
-                break
-              else
-                echo "  ⚠ Partial success ($rej_count rejects)"
-              fi
-            fi
-            ((attempt++))
-          done
-          
-          if [ -n "$(find . -name "*.rej" 2>/dev/null)" ]; then
-            echo "::warning::$SUSFS_KMAIN had rejects — non-GKI vendor trees often need manual fixes"
-          fi
-        fi
-        
-        # Cleanup SUSFS repo
-        rm -rf "$WORK" /tmp/*_fuzz*.log 2>/dev/null || true
-        
-    - name: Debug Broken SELinux Code (Optional)
-      if: failure()
-      shell: bash
-      run: |
-        echo "==> Debugging: Displaying lines 130 to 170 of selinux.c due to build failure"
-        if [ -f "${KERNEL_DIR}/drivers/kernelsu/selinux/selinux.c" ]; then
-          cat -n "${KERNEL_DIR}/drivers/kernelsu/selinux/selinux.c" | sed -n '130,170p'
-        else
-          echo "selinux.c not found at expected path."
-        fi
 
-    - name: Verify and Fix SUSFS Headers & Declarations
-      if: inputs.susfs == 'true' && inputs.ksu_variant != 'none'
-      shell: bash
-      run: |
-        cd "${KERNEL_DIR}"
-        
-        echo "==> Verifying and fixing SUSFS headers & function declarations"
-        
-        # 1. Create/verify include/linux/susfs.h
-        if [ ! -f "include/linux/susfs.h" ]; then
-          echo "⚠ include/linux/susfs.h not found, creating minimal header..."
-          
-          mkdir -p include/linux
-          cat > include/linux/susfs.h << 'SUSFS_HEADER'
-        #ifndef _LINUX_SUSFS_H
-        #define _LINUX_SUSFS_H
-        
-        #include <linux/types.h>
-        
-        #ifdef CONFIG_KSU_SUSFS
-        
-        /* SUSFS core functions - Forward declarations */
-        void susfs_sus_ino_for_show_map_vma(ino_t ino, dev_t *dev, ino_t *ino_out);
-        void susfs_sus_mount(struct vfsmount *mnt);
-        int susfs_should_hide_file(const char *pathname);
-        int susfs_should_hide_inode(unsigned long ino);
-        
-        #else
-        
-        /* Stub implementations when SUSFS not enabled */
-        static inline void susfs_sus_ino_for_show_map_vma(ino_t ino, dev_t *dev, ino_t *ino_out) {
-          if (ino_out)
-            *ino_out = ino;
-        }
-        
-        static inline void susfs_sus_mount(struct vfsmount *mnt) { }
-        
-        static inline int susfs_should_hide_file(const char *pathname) {
-          return 0;
-        }
-        
-        static inline int susfs_should_hide_inode(unsigned long ino) {
-          return 0;
-        }
-        
-        #endif /* CONFIG_KSU_SUSFS */
-        
-        #endif /* _LINUX_SUSFS_H */
-        SUSFS_HEADER
-          
-          echo "✓ Created include/linux/susfs.h with function declarations and stubs"
-        else
-          echo "✓ include/linux/susfs.h found"
-        fi
-        
-        # 1.5 FIX: Forward declare struct kstat to prevent visibility/conflicting types error
-        if [ -f "include/linux/susfs.h" ]; then
-          if ! grep -q "struct kstat;" include/linux/susfs.h; then
-            echo "⚠ Fixing struct kstat visibility in susfs.h..."
-            # Inserting 'struct kstat;' right above the first '#include' line
-            sed -i '0,/#include/s@^#include.*@struct kstat;\n&@' include/linux/susfs.h
-            echo "✓ Added struct kstat forward declaration to susfs.h"
-          fi
-        fi
-
-        # 2. Ensure fs/proc/task_mmu.c has SUSFS include safely
-        if [ -f "fs/proc/task_mmu.c" ]; then
-          if ! grep -q "linux/susfs.h" fs/proc/task_mmu.c; then
-            echo "⚠ fs/proc/task_mmu.c missing SUSFS include, forcing injection..."
-            # FIXED: Using '@' as a delimiter to prevent '/' conflicts
-            sed -i '0,/#include/s@^#include.*@#include <linux/susfs.h>\n&@' fs/proc/task_mmu.c
-            echo "✓ Added SUSFS include to task_mmu.c"
-          else
-            echo "✓ SUSFS include already in fs/proc/task_mmu.c"
-          fi
-        fi
-        
-        # 3. Check for other SUSFS function calls and verify includes
-        echo "==> Checking for other SUSFS function calls..."
-        
-        susfs_funcs=$(grep -r "susfs_sus_" fs/ kernel/ 2>/dev/null | grep -v "\.o:" | cut -d: -f1 | sort -u || true)
-        if [ -n "$susfs_funcs" ]; then
-          echo "Found SUSFS function calls in:"
-          echo "$susfs_funcs" | while read file; do
-            if [ -f "$file" ] && ! grep -q "linux/susfs.h" "$file"; then
-              echo "  ⚠ $file uses SUSFS but missing include"
-              # FIXED: Using '@' as a delimiter here as well
-              sed -i '0,/#include/s@^#include.*@#include <linux/susfs.h>\n&@' "$file"
-              echo "    ✓ Added SUSFS include"
+        # ReSukiSU gets the proven tree-overlay + inline-hook susfs
+        # install (patches/susfs_v220/tree/, no fuzzy patching — see
+        # scripts/resukisu_helpers/patch_susfs_resukisu.sh for why).
+        #
+        # SukiSU Ultra on a susfs-* setup.sh branch already ships susfs
+        # built into the driver itself — nothing to do here.
+        #
+        # Every other fork (KernelSU-Next, xxKSU, Wild KSU, SukiSU Ultra
+        # on a non-susfs branch) falls back to the generic susfs4ksu
+        # unified-diff patch. That patch was written against a fairly
+        # clean/generic tree, so on this heavily-modified MTK vendor
+        # tree it may reject partially or fully — if it does, this
+        # script does NOT fabricate stub functions to force a "pass".
+        # A kernel that compiles with fake susfs stubs isn't actually
+        # protected by susfs, and silently shipping that is worse than
+        # a clear failure. On a reject, CONFIG_KSU_SUSFS* gets unset and
+        # the build continues without susfs rather than pretending.
+        case "$KSU_VARIANT" in
+          resukisu)
+            bash "$GITHUB_WORKSPACE/scripts/resukisu_helpers/patch_susfs_resukisu.sh"
+            ;;
+          sukisu-ultra)
+            if [[ "${SUKISU_REF:-}" == susfs* ]]; then
+              echo "SUKISU_REF=${SUKISU_REF} — susfs already integrated by that branch, nothing to do."
             else
-              echo "  ✓ $file has SUSFS include"
+              bash "$GITHUB_WORKSPACE/scripts/patch_susfs.sh"
             fi
-          done
-        fi
-        
-        # 4. Add SUSFS config flags
-        DEFCONFIG_PATH="arch/${ARCH}/configs/${DEFCONFIG}"
-        echo "==> Setting SUSFS kernel config options"
-        
-        touch "$DEFCONFIG_PATH"
-        for flag in \
-          CONFIG_KSU_SUSFS=y \
-          CONFIG_KSU_SUSFS_SUS_PATH=y \
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y \
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y \
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y \
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y \
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y \
-          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y \
-          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y \
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y; do
-          
-          key="${flag%%=*}"
-          if ! grep -q "^${key}=" "$DEFCONFIG_PATH"; then
-            echo "$flag" >> "$DEFCONFIG_PATH"
-            echo "  + $flag"
-          fi
-        done
-        
-        echo "✓ SUSFS headers & declarations verified/fixed"
+            ;;
+          *)
+            bash "$GITHUB_WORKSPACE/scripts/patch_susfs.sh"
+            ;;
+        esac
 
     - name: Enable OverlayFS + stage Mountify
       if: inputs.overlayfs_mountify == 'true'
