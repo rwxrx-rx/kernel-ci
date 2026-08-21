@@ -1,0 +1,104 @@
+name: "Setup Toolchain"
+description: "Downloads/caches the selected clang flavor (aosp-clang or proton-clang)"
+
+inputs:
+  clang:
+    description: "Which clang flavor: aosp-clang | proton-clang"
+    required: true
+
+outputs:
+  toolchain-dir:
+    description: "Absolute path to the toolchain bin dir, prepend to $PATH"
+    value: ${{ steps.resolve.outputs.dir }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Load toolchain manifest
+      shell: bash
+      run: bash scripts/load_manifest.sh manifest/toolchains.env
+
+    - name: Cache toolchain
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: toolchain
+        # v2: bumped after a bad/partial cache (saved from a run that
+        # failed mid-fetch) got restored and silently skipped re-fetching
+        # in a later run. Bump this again any time you suspect a poisoned
+        # cache — cheaper than debugging "binary not found" errors.
+        key: toolchain-${{ inputs.clang }}-${{ runner.os }}-v4
+
+    # Every fetch step below checks for the actual binary on disk rather
+    # than trusting `cache-hit` alone. That was the actual bug: a
+    # previous run's cache was saved with clang present but GCC missing
+    # (it had failed before reaching the GCC fetch step), and because
+    # both fetch steps were gated on the same cache-hit flag, the next
+    # run's "hit" skipped BOTH — including the one that was never
+    # actually cached. Checking for the binary itself makes each fetch
+    # self-healing regardless of what state the cache is in.
+    - name: Fetch ProtonClang (if missing)
+      if: inputs.clang == 'proton-clang'
+      shell: bash
+      run: |
+        if [ -x toolchain/bin/clang ]; then
+          echo "ProtonClang already present, skipping fetch."
+        else
+          rm -rf toolchain
+          git clone --depth=1 -b "$PROTON_CLANG_BRANCH" "$PROTON_CLANG_REPO" toolchain
+        fi
+
+    - name: Fetch AOSP Clang (if missing)
+      if: inputs.clang == 'aosp-clang'
+      shell: bash
+      run: |
+        if [ -x toolchain/bin/clang ]; then
+          echo "AOSP clang already present, skipping fetch."
+          exit 0
+        fi
+        rm -rf toolchain aosp-clang-src
+        mkdir -p toolchain
+        git clone --depth=1 -b "$AOSP_CLANG_REF" "$AOSP_CLANG_REPO" aosp-clang-src
+        # AOSP's linux-x86 prebuilts repo stores each release under its own dir
+        if [ -d "aosp-clang-src/$AOSP_CLANG_SUBDIR" ]; then
+          mv "aosp-clang-src/$AOSP_CLANG_SUBDIR"/* toolchain/
+        else
+          echo "::error::AOSP_CLANG_SUBDIR ($AOSP_CLANG_SUBDIR) not found in prebuilts repo — update manifest/toolchains.env"
+          exit 1
+        fi
+        rm -rf aosp-clang-src
+
+    - name: Fetch GCC (binutils fallback, arm64+arm32, if missing)
+      shell: bash
+      run: |
+        if [ -x toolchain/gcc64/bin/aarch64-linux-android-ld ]; then
+          echo "gcc64 already present, skipping fetch."
+        else
+          rm -rf toolchain/gcc64
+          git clone --depth=1 -b "$GCC_BRANCH" "$GCC64_REPO" toolchain/gcc64
+        fi
+        if [ -x toolchain/gcc32/bin/arm-linux-androideabi-ld ]; then
+          echo "gcc32 already present, skipping fetch."
+        else
+          rm -rf toolchain/gcc32
+          git clone --depth=1 -b "$GCC_BRANCH" "$GCC32_REPO" toolchain/gcc32
+        fi
+
+    - name: Verify toolchain
+      shell: bash
+      run: |
+        FAIL=0
+        [ -x toolchain/bin/clang ] || { echo "::error::clang missing after fetch"; FAIL=1; }
+        [ -x toolchain/gcc64/bin/aarch64-linux-android-ld ] || { echo "::error::gcc64 ld missing after fetch"; FAIL=1; }
+        [ -x toolchain/gcc32/bin/arm-linux-androideabi-ld ] || { echo "::error::gcc32 ld missing after fetch"; FAIL=1; }
+        [ "$FAIL" = "0" ] || { echo "::error::Toolchain verification failed — delete the GitHub Actions cache for this key and re-run."; exit 1; }
+
+    - name: Resolve bin dir
+      id: resolve
+      shell: bash
+      run: |
+        DIR="$GITHUB_WORKSPACE/toolchain/bin"
+        echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+        echo "$DIR" >> "$GITHUB_PATH"
+        echo "$GITHUB_WORKSPACE/toolchain/gcc64/bin" >> "$GITHUB_PATH"
+        echo "$GITHUB_WORKSPACE/toolchain/gcc32/bin" >> "$GITHUB_PATH"

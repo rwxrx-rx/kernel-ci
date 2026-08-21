@@ -1,0 +1,32 @@
+name: "Package AnyKernel3"
+description: "Bundles out/Image (+dtb/dtbo) into a flashable AnyKernel3 zip"
+
+inputs:
+  variant-suffix:
+    description: "Appended to the zip name, e.g. KSUN-susfs, vanilla"
+    required: true
+
+outputs:
+  zip-path:
+    value: ${{ steps.zip.outputs.path }}
+  zip-name:
+    value: ${{ steps.zip.outputs.name }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Load device manifest
+      shell: bash
+      run: bash scripts/load_manifest.sh manifest/device.env
+
+    - name: Build zip
+      id: zip
+      shell: bash
+      run: bash "$GITHUB_WORKSPACE/scripts/build_anykernel3.sh" "${{ inputs.variant-suffix }}"
+
+    - name: Upload zip artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.zip.outputs.name }}
+        path: ${{ steps.zip.outputs.path }}
+        retention-days: 30

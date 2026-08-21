@@ -1,0 +1,57 @@
+name: Publish Release
+
+on:
+  workflow_call:
+    inputs:
+      release_channel:
+        required: true
+        type: string
+      run_id:
+        required: true
+        type: string
+
+jobs:
+  publish:
+    # Telegram notifications (build-started / progress / build-done + zip)
+    # are sent live from the build-kernel job itself — see
+    # scripts/telegram_build_start.sh, telegram_progress.sh,
+    # telegram_build_done.sh — so this job only needs to run at all when
+    # a GitHub Release was actually asked for.
+    if: inputs.release_channel == 'github' || inputs.release_channel == 'both'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Flatten artifacts + merge changelogs
+        id: gather
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -iname '*.zip' -o -iname '*.apk' \) -exec cp {} release-assets/ \;
+
+          TAG="camellia-$(date +%Y%m%d-%H%M)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "# Camellia kernel build — $TAG"
+            echo
+            for f in artifacts/changelog-*/changelog.md; do
+              [ -f "$f" ] && cat "$f" && echo
+            done
+          } > RELEASE_BODY.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.gather.outputs.tag }}
+          name: Camellia kernel — ${{ steps.gather.outputs.tag }}
+          body_path: RELEASE_BODY.md
+          files: release-assets/*
+          draft: false
+          prerelease: false

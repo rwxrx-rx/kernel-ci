@@ -1,0 +1,140 @@
+name: "Clone Patch SUSFS"
+description: "Clones kernel + integrates KSU + SUSFS with intelligent conflict resolution & header fixes"
+
+inputs:
+  ksu_variant:
+    description: "none | kernelsu-next-legacy | resukisu | xxksu | sukisu-ultra | wildksu"
+    required: true
+  susfs:
+    description: "true/false — patch susfs4ksu on top of the KSU fork"
+    required: true
+  overlayfs_mountify:
+    description: "true/false — enable CONFIG_OVERLAY_FS and stage the Mountify module"
+    required: true
+  feature_wireguard:
+    required: false
+    default: "false"
+  feature_baseband_guard:
+    required: false
+    default: "false"
+  feature_thinlto_o3:
+    required: false
+    default: "false"
+  feature_zram_zstd:
+    required: false
+    default: "false"
+  feature_tcp_bbr:
+    required: false
+    default: "false"
+  feature_tcp_westwood:
+    required: false
+    default: "false"
+  feature_ttl_spoof:
+    required: false
+    default: "false"
+  feature_droidspace:
+    required: false
+    default: "false"
+  feature_f2fs_opt:
+    required: false
+    default: "false"
+  device_tree_repo:
+    description: "Override device tree repo (blank = none / tree already in kernel repo)"
+    required: false
+    default: ""
+  device_tree_branch:
+    description: "Override device tree branch"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Load manifests
+      shell: bash
+      run: bash scripts/load_manifest.sh manifest/device.env manifest/ksu-variants.env
+
+    - name: Clone kernel source
+      shell: bash
+      run: |
+        git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel
+        echo "KERNEL_DIR=$GITHUB_WORKSPACE/kernel" >> "$GITHUB_ENV"
+
+    - name: Overlay a custom device tree (optional)
+      if: inputs.device_tree_repo != ''
+      shell: bash
+      run: |
+        DT_BRANCH="${{ inputs.device_tree_branch }}"
+        DT_BRANCH="${DT_BRANCH:-main}"
+        echo "Swapping in device tree: ${{ inputs.device_tree_repo }} @ $DT_BRANCH"
+        git clone --depth=1 -b "$DT_BRANCH" "${{ inputs.device_tree_repo }}" devicetree
+        rsync -a devicetree/ kernel/
+        rm -rf devicetree
+
+    - name: Patch selected KernelSU fork
+      shell: bash
+      env:
+        KSU_VARIANT: ${{ inputs.ksu_variant }}
+      run: bash "$GITHUB_WORKSPACE/scripts/patch_ksu.sh"
+
+    - name: Patch susfs4ksu
+      if: inputs.susfs == 'true' && inputs.ksu_variant != 'none'
+      shell: bash
+      env:
+        KSU_VARIANT: ${{ inputs.ksu_variant }}
+      run: |
+        set -euo pipefail
+        : "${KERNEL_DIR:?KERNEL_DIR not set}"
+        : "${KSU_DIR:?KSU_DIR not set (patch_ksu.sh must run first)}"
+
+        # ReSukiSU gets the proven tree-overlay + inline-hook susfs
+        # install (patches/susfs_v220/tree/, no fuzzy patching — see
+        # scripts/resukisu_helpers/patch_susfs_resukisu.sh for why).
+        #
+        # SukiSU Ultra on a susfs-* setup.sh branch already ships susfs
+        # built into the driver itself — nothing to do here.
+        #
+        # Every other fork (KernelSU-Next, xxKSU, Wild KSU, SukiSU Ultra
+        # on a non-susfs branch) falls back to the generic susfs4ksu
+        # unified-diff patch. That patch was written against a fairly
+        # clean/generic tree, so on this heavily-modified MTK vendor
+        # tree it may reject partially or fully — if it does, this
+        # script does NOT fabricate stub functions to force a "pass".
+        # A kernel that compiles with fake susfs stubs isn't actually
+        # protected by susfs, and silently shipping that is worse than
+        # a clear failure. On a reject, CONFIG_KSU_SUSFS* gets unset and
+        # the build continues without susfs rather than pretending.
+        case "$KSU_VARIANT" in
+          resukisu)
+            bash "$GITHUB_WORKSPACE/scripts/resukisu_helpers/patch_susfs_resukisu.sh"
+            ;;
+          sukisu-ultra)
+            if [[ "${SUKISU_REF:-}" == susfs* ]]; then
+              echo "SUKISU_REF=${SUKISU_REF} — susfs already integrated by that branch, nothing to do."
+            else
+              bash "$GITHUB_WORKSPACE/scripts/patch_susfs.sh"
+            fi
+            ;;
+          *)
+            bash "$GITHUB_WORKSPACE/scripts/patch_susfs.sh"
+            ;;
+        esac
+
+    - name: Enable OverlayFS + stage Mountify
+      if: inputs.overlayfs_mountify == 'true'
+      shell: bash
+      run: bash "$GITHUB_WORKSPACE/scripts/patch_overlayfs_mountify.sh"
+
+    - name: Inject optional features (WireGuard, BBG, ThinLTO+O3, ZRAM zstd, BBR/Westwood, TTL spoof, DroidSpace)
+      shell: bash
+      env:
+        FEATURE_WIREGUARD: ${{ inputs.feature_wireguard }}
+        FEATURE_BASEBAND_GUARD: ${{ inputs.feature_baseband_guard }}
+        FEATURE_THINLTO_O3: ${{ inputs.feature_thinlto_o3 }}
+        FEATURE_ZRAM_ZSTD: ${{ inputs.feature_zram_zstd }}
+        FEATURE_TCP_BBR: ${{ inputs.feature_tcp_bbr }}
+        FEATURE_TCP_WESTWOOD: ${{ inputs.feature_tcp_westwood }}
+        FEATURE_TTL_SPOOF: ${{ inputs.feature_ttl_spoof }}
+        FEATURE_DROIDSPACE: ${{ inputs.feature_droidspace }}
+        FEATURE_F2FS_OPT: ${{ inputs.feature_f2fs_opt }}
+      run: bash "$GITHUB_WORKSPACE/scripts/patch_features.sh"

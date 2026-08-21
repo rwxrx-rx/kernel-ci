@@ -1,0 +1,73 @@
+name: "Build Kernel"
+description: "Runs make olddefconfig + make with the resolved clang toolchain"
+
+inputs:
+  clang:
+    required: true
+  jobs:
+    required: false
+    default: "$(nproc --all)"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Load device manifest
+      shell: bash
+      run: bash scripts/load_manifest.sh manifest/device.env
+
+    - name: Build
+      shell: bash
+      env:
+        CLANG_FLAVOR: ${{ inputs.clang }}
+      run: |
+        cd "$KERNEL_DIR"
+
+        MAKE_ARGS=(
+          ARCH="$ARCH"
+          O=out
+          CC=clang
+          LD=ld.lld
+          CLANG_TRIPLE=aarch64-linux-gnu-
+          CROSS_COMPILE=aarch64-linux-android-
+          CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          LLVM=1
+          LLVM_IAS=1
+          # Host-side tools (fixdep, conf, genheaders, the vdso build
+          # helpers, ...) run ON THE RUNNER, not the target device — they
+          # must link against the runner's own modern glibc. Without
+          # this, Kbuild falls back to plain `ld`/`gcc` resolved via
+          # $PATH, which — because toolchain/bin is prepended to PATH by
+          # setup-toolchain — picks up ProtonClang's OWN bundled `ld`
+          # instead of the system one. That bundled ld is old enough to
+          # not understand `.relr.dyn` (a modern ELF/glibc relocation
+          # section), so every host tool link fails with "unknown type
+          # [0x13] section .relr.dyn" / "skipping incompatible libc.so.6"
+          # — which is what was actually breaking vdso/genheaders/etc in
+          # both the vanilla and KSU builds (this was never KSU-specific).
+          HOSTCC="/usr/bin/gcc -B/usr/bin/"
+          HOSTCXX="/usr/bin/g++ -B/usr/bin/"
+          HOSTLDFLAGS="-B/usr/bin/"
+        )
+
+        make "${MAKE_ARGS[@]}" "$DEFCONFIG"
+        make "${MAKE_ARGS[@]}" -j"${{ inputs.jobs }}" 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+        IMG="out/arch/${ARCH}/boot/Image.gz-dtb"
+        [ -f "$IMG" ] || IMG="out/arch/${ARCH}/boot/Image.gz"
+        [ -f "$IMG" ] || IMG="out/arch/${ARCH}/boot/Image"
+        if [ ! -f "$IMG" ]; then
+          echo "::error::No kernel Image found under out/arch/${ARCH}/boot/ — check build.log"
+          exit 1
+        fi
+        mkdir -p "$GITHUB_WORKSPACE/out"
+        cp "$IMG" "$GITHUB_WORKSPACE/out/Image"
+        find out/arch/"$ARCH"/boot -name '*.dtb' -exec cp {} "$GITHUB_WORKSPACE/out/" \; || true
+        find out/arch/"$ARCH"/boot -name '*dtbo*.img' -exec cp {} "$GITHUB_WORKSPACE/out/" \; || true
+
+    - name: Upload build log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log-${{ inputs.clang }}
+        path: build.log
+        retention-days: 7
