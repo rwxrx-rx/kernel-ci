@@ -193,6 +193,47 @@ int kallsyms_on_each_symbol(int (*fn)(void *, const char *, struct module *,
 }
 EXPORT_SYMBOL_GPL(kallsyms_on_each_symbol);
 
+/*
+ * The tree overlay's kallsyms.c calls these but never defines them; in
+ * stock kallsyms.c they live in this same file. Something elsewhere in
+ * the tree also needs is_kernel_inittext/is_ksym_addr with external
+ * linkage (that's the pair ld.lld reports missing), so those two stay
+ * non-static while the two they're built from stay file-local, matching
+ * what the linker actually asked for instead of exporting more than
+ * necessary. arch_is_kernel_text()/in_gate_area_no_mm() are deliberately
+ * left out - both are x86 vsyscall-gate/module-PLT extras that don't
+ * apply on this arm64 target.
+ */
+static int is_kernel_text(unsigned long addr)
+{
+	if (addr >= (unsigned long)_stext && addr <= (unsigned long)_etext)
+		return 1;
+	return 0;
+}
+
+static int is_kernel(unsigned long addr)
+{
+	if (addr >= (unsigned long)_stext && addr <= (unsigned long)_end)
+		return 1;
+	return 0;
+}
+
+int is_kernel_inittext(unsigned long addr)
+{
+	if (addr >= (unsigned long)_sinittext
+	    && addr <= (unsigned long)_einittext)
+		return 1;
+	return 0;
+}
+
+int is_ksym_addr(unsigned long addr)
+{
+	if (IS_ENABLED(CONFIG_KALLSYMS_ALL))
+		return is_kernel(addr);
+
+	return is_kernel_text(addr) || is_kernel_inittext(addr);
+}
+
 static unsigned long get_symbol_pos(unsigned long addr,
 				    unsigned long *symbolsize,
 				    unsigned long *offset)
