@@ -23,6 +23,8 @@
 #include <linux/slab.h>
 #include <linux/filter.h>
 #include <linux/compiler.h>
+#include <linux/module.h>	/* MODULE_NAME_LEN, used by KSYM_SYMBOL_LEN */
+#include <linux/security.h>	/* security_capable(), CAP_OPT_NOAUDIT */
 
 /*
  * These will be re-linked against their real values
