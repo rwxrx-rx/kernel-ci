@@ -21,6 +21,30 @@ def once(rel: str, old: str, new: str, label: str) -> None:
     p.write_text(text.replace(old, new, 1))
     print(f"inline hook integrated: {label}")
 
+# include/linux/sched.h is intentionally NOT part of the tree overlay in
+# patches/susfs_v220/tree/ anymore. That overlay's copy was captured with
+# struct sched_param still defined directly in linux/sched.h; on trees where
+# that struct has since moved to uapi/linux/sched/types.h — which is where
+# KERNEL_BRANCH currently sits, since it's a floating branch, not a pinned
+# commit — a wholesale copy reintroduces it as a duplicate definition and
+# kernel/kthread.c fails with "redefinition of 'sched_param'". The only
+# susfs-specific content in that file is two task_struct fields, so add
+# just those, anchored on the upstream "randomized_struct_fields_end"
+# boilerplate instead of overwriting the whole file.
+once("include/linux/sched.h", """\t/*
+\t * New fields for task_struct should be added above here, so that
+\t * they are included in the randomized portion of task_struct.
+\t */
+\trandomized_struct_fields_end""", """\t/*
+\t * New fields for task_struct should be added above here, so that
+\t * they are included in the randomized portion of task_struct.
+\t */
+#ifdef CONFIG_KSU_SUSFS
+\tu64 susfs_task_state;
+\tu64 susfs_last_fake_mnt_id;
+#endif
+\trandomized_struct_fields_end""", "task_struct-susfs-fields")
+
 once("kernel/sys.c", """SYSCALL_DEFINE3(setresuid, uid_t, ruid, uid_t, euid, uid_t, suid)
 {
 """, """#ifdef CONFIG_KSU_SUSFS
